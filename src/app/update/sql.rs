@@ -17,6 +17,17 @@ impl App {
                     let node = crate::format::cell_node(array.as_ref(), row, &opts);
                     let schema = batch.schema();
                     let field = schema.field(col);
+                    // Scalar cells open a read-only, wrapping reader; nested
+                    // cells (List/Struct/Map) keep the tree view.
+                    t.cell_detail_editor = match &node {
+                        crate::format::NestedNode::Leaf(s) => {
+                            Some(text_editor::Content::with_text(s))
+                        }
+                        crate::format::NestedNode::Null => {
+                            Some(text_editor::Content::with_text(""))
+                        }
+                        _ => None,
+                    };
                     t.cell_detail = Some(CellDetail {
                         row,
                         col,
@@ -30,6 +41,18 @@ impl App {
             SqlMessage::CloseCellDetail { id } => {
                 if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id) {
                     t.cell_detail = None;
+                    t.cell_detail_editor = None;
+                }
+                Task::none()
+            }
+            SqlMessage::CellDetailEditorAction { id, action } => {
+                // Read-only: apply only non-edit actions (drag-select, caret
+                // moves, scroll) so text stays selectable/copyable but immutable.
+                if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id)
+                    && let Some(ed) = t.cell_detail_editor.as_mut()
+                    && !action.is_edit()
+                {
+                    ed.perform(action);
                 }
                 Task::none()
             }
@@ -156,6 +179,22 @@ impl App {
                 Task::none()
             }
             SqlMessage::Run(id) => self.run_editor(id),
+            SqlMessage::Cancel(id) => {
+                if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id) {
+                    if let Some(handle) = t.query_handle.take() {
+                        handle.abort();
+                    }
+                    t.running = false;
+                }
+                // Neutral, auto-clearing notice (reuses the export-notice pattern).
+                self.copy_notice = Some("Query cancelled".to_string());
+                Task::perform(
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                    },
+                    |_| FileMessage::ClearCopyNotice.into(),
+                )
+            }
             SqlMessage::Explain(id) | SqlMessage::ExplainAnalyze(id) => {
                 let kind = if matches!(m, SqlMessage::ExplainAnalyze(_)) {
                     ExplainKind::Analyze
@@ -312,6 +351,7 @@ impl App {
                 let explain_kind = crate::explain::detect(&sql);
                 if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id) {
                     t.running = false;
+                    t.query_handle = None;
                     t.last_elapsed_ms = Some(elapsed_ms);
                     t.explain = explain_kind;
                     match result {

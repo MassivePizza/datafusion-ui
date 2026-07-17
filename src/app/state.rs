@@ -168,6 +168,9 @@ pub struct App {
     /// Persisted per-schema column widths, keyed by schema signature. Seeds the
     /// per-grid `col_widths` whenever a matching schema is loaded.
     pub column_widths: HashMap<String, Vec<f32>>,
+    /// Persisted uniform grid row height (global preference, not per schema).
+    /// Seeds each new editor tab's `row_height`.
+    pub grid_row_height: f32,
     /// Recently opened data files, newest first.
     pub recent_files: Vec<RecentFile>,
 
@@ -221,6 +224,9 @@ pub struct SqlEditorTab {
     pub title: String,
     pub content: text_editor::Content,
     pub running: bool,
+    /// Abort handle for the in-flight query, if one is running. Set when a
+    /// query Task is spawned; taken on cancel or cleared on completion.
+    pub query_handle: Option<iced::task::Handle>,
     pub batch: Option<RecordBatch>,
     pub schema: Option<SchemaRef>,
     pub error: Option<String>,
@@ -233,9 +239,15 @@ pub struct SqlEditorTab {
     pub diagnostics: Vec<sql_ide::Diagnostic>,
     /// Expanded nested-cell detail for this editor's results grid, if open.
     pub cell_detail: Option<CellDetail>,
+    /// Read-only reader buffer for an expanded scalar (text) cell, so the detail
+    /// overlay can wrap + select long values. `None` for nested cells (tree view).
+    pub cell_detail_editor: Option<text_editor::Content>,
     /// Per-column display widths for the results grid, indexed by column.
     /// Re-seeded on each completed query (schema may change).
     pub col_widths: Vec<f32>,
+    /// Uniform data-row height for this tab's results grid; seeded from the
+    /// persisted global preference.
+    pub row_height: f32,
     /// Per-column statistics for the current result set, shown in the grid's
     /// stats row. Computed from the result batch on completion; empty for
     /// EXPLAIN results and errors.

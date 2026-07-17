@@ -1,8 +1,9 @@
 //! App-managed persistent state, stored as Parquet in the OS *data* dir
 //! (distinct from the human-edited `config.toml` in the *config* dir).
 //!
-//! Three small whole-file snapshots are rewritten on change — query history,
-//! per-schema column widths, and recently opened files. Parquet (rather than a
+//! Four small whole-file snapshots are rewritten on change — query history,
+//! per-schema column widths, recently opened files, and UI preferences
+//! (grid row height). Parquet (rather than a
 //! bespoke format) is deliberate: the files are also queryable by the app's own
 //! DataFusion engine, and we already depend on the `parquet`/`arrow` writers.
 //!
@@ -29,6 +30,10 @@ use crate::app::{HistoryStatus, QueryHistoryEntry};
 const HISTORY_FILE: &str = "query_history.parquet";
 const WIDTHS_FILE: &str = "column_widths.parquet";
 const RECENT_FILE: &str = "recent_files.parquet";
+const UI_PREFS_FILE: &str = "ui_prefs.parquet";
+
+/// Key of the grid row-height preference in `ui_prefs.parquet`.
+const ROW_HEIGHT_KEY: &str = "grid_row_height";
 
 /// A recently opened data file, newest first.
 #[derive(Debug, Clone)]
@@ -258,6 +263,43 @@ impl StateStore {
         }
     }
 
+    // -- UI preferences -------------------------------------------------------
+
+    /// The persisted uniform grid row height, if one was saved and is sane.
+    pub fn load_grid_row_height(&self) -> Option<f32> {
+        for batch in self.read(UI_PREFS_FILE) {
+            let key = str_col(&batch, "key");
+            let value = f32_col(&batch, "value");
+            for r in 0..batch.num_rows() {
+                if get_str(&key, r) == Some(ROW_HEIGHT_KEY)
+                    && let Some(v) = get_f32(&value, r)
+                    && v.is_finite()
+                    && v > 0.0
+                {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn save_grid_row_height(&self, height: f32) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Float32, false),
+        ]));
+        match RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![ROW_HEIGHT_KEY])),
+                Arc::new(Float32Array::from(vec![height])),
+            ],
+        ) {
+            Ok(batch) => self.write(UI_PREFS_FILE, &batch),
+            Err(e) => tracing::warn!(error = %e, "could not build ui-prefs batch"),
+        }
+    }
+
     // -- Recent files ---------------------------------------------------------
 
     pub fn load_recent_files(&self) -> Vec<RecentFile> {
@@ -297,6 +339,7 @@ pub enum StateFile {
     History,
     ColumnWidths,
     RecentFiles,
+    UiPrefs,
 }
 
 impl StateFile {
@@ -305,6 +348,7 @@ impl StateFile {
             StateFile::History => HISTORY_FILE,
             StateFile::ColumnWidths => WIDTHS_FILE,
             StateFile::RecentFiles => RECENT_FILE,
+            StateFile::UiPrefs => UI_PREFS_FILE,
         }
     }
 
@@ -314,13 +358,15 @@ impl StateFile {
             StateFile::History => "history",
             StateFile::ColumnWidths => "column_widths",
             StateFile::RecentFiles => "recent_files",
+            StateFile::UiPrefs => "ui_prefs",
         }
     }
 
-    pub const ALL: [StateFile; 3] = [
+    pub const ALL: [StateFile; 4] = [
         StateFile::History,
         StateFile::ColumnWidths,
         StateFile::RecentFiles,
+        StateFile::UiPrefs,
     ];
 }
 
@@ -448,6 +494,15 @@ mod tests {
         // Sorted newest-first.
         assert_eq!(loaded[0].path, "/b.parquet");
         assert_eq!(loaded[1].path, "/a.parquet");
+        let _ = std::fs::remove_dir_all(store.dir);
+    }
+
+    #[test]
+    fn row_height_round_trip() {
+        let store = StateStore::with_dir(temp_dir("row-height"));
+        assert_eq!(store.load_grid_row_height(), None);
+        store.save_grid_row_height(42.5);
+        assert_eq!(store.load_grid_row_height(), Some(42.5));
         let _ = std::fs::remove_dir_all(store.dir);
     }
 }

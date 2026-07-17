@@ -78,6 +78,8 @@ pub enum SqlMessage {
     /// Redo the last undone edit group (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y).
     Redo(u64),
     Run(u64),
+    /// Abort the in-flight query for this editor (the Cancel button).
+    Cancel(u64),
     /// Run the editor's query wrapped in `EXPLAIN` (leaving the editor text as
     /// the user wrote it).
     Explain(u64),
@@ -124,6 +126,11 @@ pub enum SqlMessage {
     CloseCellDetail {
         id: u64,
     },
+    /// Selection/scroll actions from the cell-detail reader; edits are ignored.
+    CellDetailEditorAction {
+        id: u64,
+        action: iced::widget::text_editor::Action,
+    },
     /// Jump the results grid to a (0-based) page; clamped to the valid range.
     SetResultPage {
         id: u64,
@@ -131,9 +138,9 @@ pub enum SqlMessage {
     },
 }
 
-/// Resizable columns for a SQL editor's results grid (keyed by editor id).
+/// Resizable columns and rows for a SQL editor's results grid (keyed by
+/// editor id).
 #[derive(Debug, Clone)]
-#[allow(clippy::enum_variant_names)] // every variant is about a Column; the prefix reads well here
 pub enum GridMessage {
     /// Live width update while dragging a column's resize handle.
     ColumnResize { id: u64, col: usize, width: f32 },
@@ -141,6 +148,12 @@ pub enum GridMessage {
     ColumnResizeEnd { id: u64 },
     /// Double-click — auto-size the column to its widest visible value.
     ColumnAutofit { id: u64, col: usize },
+    /// Live update of the grid's uniform row height while dragging.
+    RowResize { id: u64, height: f32 },
+    /// Row-height drag finished — persist the global preference.
+    RowResizeEnd { id: u64 },
+    /// Double-click on a row handle — reset to the default row height.
+    RowHeightReset { id: u64 },
 }
 
 /// The FlightSQL connect modal and connection lifecycle.

@@ -18,7 +18,7 @@ use crate::explorer::{Explorer, ExplorerLoad, ExplorerTarget, LoadRequest};
 use crate::flightsql::{FlightAuth, FlightSqlClient, FlightSqlConfig};
 use crate::parquet_io::load_metadata;
 use crate::store::{RecentFile, StateFile, StateStore};
-use crate::widgets::MIN_COL_WIDTH;
+use crate::widgets::{MIN_COL_WIDTH, MIN_ROW_HEIGHT};
 use crate::wrangle::SharedSession;
 use crate::wrangle::naming::derive_table_name;
 use crate::{SubCommand, theme};
@@ -43,12 +43,16 @@ impl App {
         let store = StateStore::new(&app_dir);
         let history = store.load_history();
         let column_widths = store.load_column_widths();
+        let grid_row_height = store
+            .load_grid_row_height()
+            .unwrap_or(crate::views::data::DEFAULT_ROW_HEIGHT);
         let recent_files = store.load_recent_files();
         let mut app = App {
             local,
             config,
             store,
             column_widths,
+            grid_row_height,
             recent_files,
             app_dir,
             system_is_dark: crate::config::detect_system_dark(),
@@ -330,6 +334,7 @@ impl App {
             title,
             content: text_editor::Content::with_text(&starter),
             running: false,
+            query_handle: None,
             batch: None,
             schema: None,
             error: None,
@@ -339,7 +344,9 @@ impl App {
             completion: None,
             diagnostics: Vec::new(),
             cell_detail: None,
+            cell_detail_editor: None,
             col_widths: Vec::new(),
+            row_height: self.seed_row_height(),
             insights: Vec::new(),
             page: 0,
             explain: None,
@@ -377,7 +384,7 @@ impl App {
         t.running = true;
         t.error = None;
         let started = Instant::now();
-        Task::perform(
+        let (task, handle) = Task::perform(
             async move {
                 let result = engine.run_query(sql.clone(), cap).await;
                 (sql, source_label, started.elapsed().as_millis(), result)
@@ -393,6 +400,9 @@ impl App {
                 .into()
             },
         )
+        .abortable();
+        t.query_handle = Some(handle);
+        task
     }
 
     /// Build the completion [`sql_ide::Catalog`] for a tab's bound engine.
@@ -546,6 +556,30 @@ impl App {
         if let Some((sig, widths)) = entry {
             self.column_widths.insert(sig, widths);
             self.store.save_column_widths(&self.column_widths);
+        }
+    }
+
+    /// Row height for a new grid: the persisted global preference, or the
+    /// default when unset (`App::default()` leaves it 0.0).
+    fn seed_row_height(&self) -> f32 {
+        if self.grid_row_height >= crate::widgets::MIN_ROW_HEIGHT {
+            self.grid_row_height
+        } else {
+            crate::views::data::DEFAULT_ROW_HEIGHT
+        }
+    }
+
+    /// Persist a SQL editor grid's row height as the global preference.
+    fn persist_row_height(&mut self, id: u64) {
+        if let Some(h) = self
+            .sql
+            .editors
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.row_height)
+        {
+            self.grid_row_height = h;
+            self.store.save_grid_row_height(h);
         }
     }
 

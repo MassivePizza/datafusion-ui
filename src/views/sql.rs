@@ -49,7 +49,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             main,
             crate::views::data::cell_detail_overlay(
                 detail,
-                SqlMessage::CloseCellDetail { id }.into()
+                active.and_then(|t| t.cell_detail_editor.as_ref()),
+                id,
+                SqlMessage::CloseCellDetail { id }.into(),
             )
         ]
         .into(),
@@ -199,9 +201,6 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
     }
     let editor_layer: Element<'_, Message> = layers.into();
 
-    let mut run = button(theme::ui_medium("Run  ▷").size(12))
-        .style(theme::accent_button)
-        .padding([6, 16]);
     let mut explain_btn = button(theme::ui_medium("Explain").size(12))
         .style(theme::ghost_button)
         .padding([6, 12]);
@@ -212,11 +211,24 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
         .style(theme::ghost_button)
         .padding([6, 12]);
     if !tab.running {
-        run = run.on_press(SqlMessage::Run(id).into());
         explain_btn = explain_btn.on_press(SqlMessage::Explain(id).into());
         explain_an_btn = explain_an_btn.on_press(SqlMessage::ExplainAnalyze(id).into());
         export_btn = export_btn.on_press(SqlMessage::ExportOpen(id).into());
     }
+    // While a query runs, the Run button becomes a Cancel button that aborts it.
+    let run: Element<'_, Message> = if tab.running {
+        button(theme::ui_medium("Cancel  ◼").size(12))
+            .style(theme::danger_button)
+            .padding([6, 16])
+            .on_press(SqlMessage::Cancel(id).into())
+            .into()
+    } else {
+        button(theme::ui_medium("Run  ▷").size(12))
+            .style(theme::accent_button)
+            .padding([6, 16])
+            .on_press(SqlMessage::Run(id).into())
+            .into()
+    };
 
     let source_pill = container(theme::mono_sm(elide(&tab.title, 32)).wrapping(Wrapping::None))
         .padding([2, 8])
@@ -303,13 +315,13 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
             // EXPLAIN result, but the user asked for the raw grid.
             Some(kind) => column![
                 explain_toggle(id, kind, tab.explain_raw),
-                results_grid(b, id, &tab.insights, &tab.col_widths, tab.page),
+                results_grid(b, id, &tab.insights, &tab.col_widths, tab.row_height, tab.page),
             ]
             .spacing(6)
             .height(Length::Fill)
             .into(),
             // Ordinary result set.
-            None => results_grid(b, id, &tab.insights, &tab.col_widths, tab.page),
+            None => results_grid(b, id, &tab.insights, &tab.col_widths, tab.row_height, tab.page),
         },
         Some(_) => container(theme::mono_sm("(query returned no rows)"))
             .padding(12)
@@ -488,6 +500,7 @@ fn results_grid<'a>(
     id: u64,
     insights: &'a [crate::wrangle::insights::ColumnInsight],
     col_widths: &'a [f32],
+    row_height: f32,
     page: usize,
 ) -> Element<'a, Message> {
     let total = batch.num_rows();
@@ -501,6 +514,7 @@ fn results_grid<'a>(
         page,
         RESULT_PAGE_SIZE,
         col_widths,
+        row_height,
     ))
     .direction(iced::widget::scrollable::Direction::Both {
         vertical: iced::widget::scrollable::Scrollbar::default(),

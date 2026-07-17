@@ -30,6 +30,24 @@ impl App {
                 self.persist_col_widths(id);
                 Task::none()
             }
+            GridMessage::RowResize { id, height } => {
+                let h = height.clamp(MIN_ROW_HEIGHT, 400.0);
+                if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id) {
+                    t.row_height = h;
+                }
+                Task::none()
+            }
+            GridMessage::RowResizeEnd { id } => {
+                self.persist_row_height(id);
+                Task::none()
+            }
+            GridMessage::RowHeightReset { id } => {
+                if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id) {
+                    t.row_height = crate::views::data::DEFAULT_ROW_HEIGHT;
+                }
+                self.persist_row_height(id);
+                Task::none()
+            }
         }
     }
 }

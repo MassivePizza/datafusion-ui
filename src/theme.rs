@@ -432,6 +432,27 @@ pub fn accent_button(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Solid button in the rose accent, for destructive/stop actions (e.g. Cancel).
+pub fn danger_button(_: &Theme, status: button::Status) -> button::Style {
+    let accent = palette::accent_rose();
+    let bg = match status {
+        button::Status::Hovered => shade(accent, 0.10),
+        button::Status::Pressed => shade(accent, -0.12),
+        button::Status::Disabled => Color { a: 0.4, ..accent },
+        _ => accent,
+    };
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: on_color(accent),
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 4.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
 /// Pick a readable foreground (near-black or near-white) for text drawn on top
 /// of `bg`, based on its perceived luminance.
 fn on_color(bg: Color) -> Color {

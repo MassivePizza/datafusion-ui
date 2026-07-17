@@ -10,22 +10,27 @@ use iced::widget::container::Style as ContainerStyle;
 use iced::widget::text::Wrapping;
 use iced::widget::{
     Space, button, canvas, column, container, mouse_area, opaque, row, scrollable, stack, text,
-    tooltip,
+    text_editor, tooltip,
 };
 use iced::{Background, Border, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::{CellDetail, FileMessage, GridMessage, Message, SqlMessage};
 use crate::format::{NestedNode, default_options, is_nested, row_strings};
-use crate::widgets::resize_handle;
+use crate::widgets::{resize_handle, resize_handle_vertical};
 use crate::wrangle::insights::{ColumnInsight, ColumnKind, Histogram, classify};
 
 pub(crate) const CELL_WIDTH: f32 = 180.0;
 const ROW_NUMBER_WIDTH: f32 = 60.0;
-const ROW_HEIGHT: f32 = 24.0;
+/// Default data-row height; the user can drag a row's bottom edge (in the
+/// row-number gutter) to change the grid's uniform height.
+pub(crate) const DEFAULT_ROW_HEIGHT: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 48.0;
 const INSIGHTS_HEIGHT: f32 = 100.0;
 const HISTO_HEIGHT: f32 = 36.0;
 const OVERFLOW_CHAR_THRESHOLD: usize = 20;
+/// Cells longer than this open the scrollable reader overlay on click, instead
+/// of copy-on-click. Tunable.
+const READER_CHAR_THRESHOLD: usize = 100;
 
 /// Width of the resize-handle hit area at the right edge of each header cell.
 /// Must match `widgets::resize_handle`'s hit width so the label cell + handle
@@ -34,8 +39,66 @@ const RESIZE_HANDLE_W: f32 = 8.0;
 
 pub(crate) fn cell_detail_overlay<'a>(
     detail: &'a CellDetail,
+    editor: Option<&'a text_editor::Content>,
+    id: u64,
     on_close: Message,
 ) -> Element<'a, Message> {
+    // Reading mode for scalar (text) cells: a read-only, wrapping, selectable
+    // editor. Nested cells fall through to the tree view below.
+    if let Some(content) = editor {
+        let leaf = match &detail.node {
+            NestedNode::Leaf(s) => s.clone(),
+            _ => String::new(),
+        };
+        let chars = leaf.chars().count();
+        let header = row![
+            text(format!("{} · row {}", detail.column_name, detail.row + 1))
+                .size(14)
+                .wrapping(Wrapping::None),
+            Space::new().width(Length::Fill),
+            button(text("Copy").size(11))
+                .style(button::secondary)
+                .on_press(FileMessage::CopyCell(leaf).into()),
+            button(text("Close").size(11))
+                .style(button::secondary)
+                .on_press(on_close.clone()),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+
+        let type_line = text(format!("{} · {} chars", detail.type_label, chars)).size(11);
+
+        let reader = text_editor(content)
+            .on_action(move |action| SqlMessage::CellDetailEditorAction { id, action }.into())
+            .font(crate::theme::FONT_MONO)
+            .size(13)
+            .wrapping(Wrapping::Word)
+            .padding(8)
+            .height(Length::Fill);
+
+        let panel = container(column![header, type_line, reader].spacing(8))
+            .padding(14)
+            .width(Length::Fixed(720.0))
+            .height(Length::Fixed(560.0))
+            .style(detail_panel_style);
+
+        let backdrop = mouse_area(
+            container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(crate::theme::backdrop),
+        )
+        .on_press(on_close);
+
+        let centered = container(opaque(panel))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+
+        return stack![backdrop, centered].into();
+    }
+
     let header = row![
         text(format!("{} · row {}", detail.column_name, detail.row + 1))
             .size(14)
@@ -199,6 +262,7 @@ pub(crate) fn view_grid<'a>(
     page: usize,
     page_size: usize,
     widths: &[f32],
+    row_height: f32,
 ) -> Element<'a, Message> {
     let opts = default_options();
     let schema = batch.schema();
@@ -244,7 +308,7 @@ pub(crate) fn view_grid<'a>(
     for r in offset..end {
         let values = row_strings(batch, r, &opts);
         let zebra = r % 2 == 1;
-        let mut row_widgets = row![row_number_cell(r + 1, zebra)].spacing(0);
+        let mut row_widgets = row![row_number_cell(r + 1, zebra, row_height, id)].spacing(0);
         for (c, v) in values.into_iter().enumerate() {
             let dt = schema.field(c).data_type();
             let is_nested_cell = is_nested(dt);
@@ -260,7 +324,7 @@ pub(crate) fn view_grid<'a>(
             ));
         }
         let styled = container(row_widgets)
-            .height(Length::Fixed(ROW_HEIGHT))
+            .height(Length::Fixed(row_height))
             .style(body_row_style);
         rows_col = rows_col.push(styled);
         rows_col = rows_col.push(
@@ -552,7 +616,7 @@ fn body_cell<'a>(
     let mut label = text(display)
         .font(crate::theme::FONT_MONO)
         .size(12)
-        .wrapping(Wrapping::None);
+        .wrapping(Wrapping::WordOrGlyph);
     if right_align {
         label = label
             .align_x(iced::alignment::Horizontal::Right)
@@ -574,21 +638,30 @@ fn body_cell<'a>(
         .clip(true)
         .style(body_cell_style);
 
-    let with_tooltip: Element<'a, Message> =
-        if !is_nested && value.chars().count() > OVERFLOW_CHAR_THRESHOLD {
-            tooltip(inner, tooltip_box(value.clone()), tooltip::Position::Top).into()
-        } else if is_nested {
-            tooltip(
-                inner,
-                tooltip_box("Click to expand".to_string()),
-                tooltip::Position::Top,
-            )
-            .into()
-        } else {
-            inner.into()
-        };
+    let len = value.chars().count();
+    let opens_reader = !is_nested && len > READER_CHAR_THRESHOLD;
+    let with_tooltip: Element<'a, Message> = if is_nested {
+        tooltip(
+            inner,
+            tooltip_box("Click to expand".to_string()),
+            tooltip::Position::Top,
+        )
+        .into()
+    } else if opens_reader {
+        // Don't dump the whole essay into a hover tooltip; the reader is better.
+        tooltip(
+            inner,
+            tooltip_box("Click to read".to_string()),
+            tooltip::Position::Top,
+        )
+        .into()
+    } else if len > OVERFLOW_CHAR_THRESHOLD {
+        tooltip(inner, tooltip_box(value.clone()), tooltip::Position::Top).into()
+    } else {
+        inner.into()
+    };
 
-    let on_press = if is_nested {
+    let on_press = if is_nested || opens_reader {
         SqlMessage::ShowCellDetail { id, row, col }.into()
     } else {
         FileMessage::CopyCell(value).into()
@@ -597,9 +670,9 @@ fn body_cell<'a>(
     mouse_area(with_tooltip).on_press(on_press).into()
 }
 
-fn row_number_cell<'a>(n: usize, zebra: bool) -> Element<'a, Message> {
+fn row_number_cell<'a>(n: usize, zebra: bool, row_height: f32, id: u64) -> Element<'a, Message> {
     let _ = zebra;
-    container(
+    let number = container(
         text(format!("{}", n))
             .font(crate::theme::FONT_MONO)
             .size(11)
@@ -614,7 +687,21 @@ fn row_number_cell<'a>(n: usize, zebra: bool) -> Element<'a, Message> {
     .height(Length::Fill)
     .padding([4, 10])
     .clip(true)
-    .style(row_number_style)
+    .style(row_number_style);
+    // Overlay a row-resize handle on the cell's bottom edge; dragging it
+    // adjusts the grid's uniform row height.
+    let handle = resize_handle_vertical(
+        row_height,
+        move |h| GridMessage::RowResize { id, height: h }.into(),
+        GridMessage::RowResizeEnd { id }.into(),
+        GridMessage::RowHeightReset { id }.into(),
+    );
+    stack![
+        number,
+        column![Space::new().height(Length::Fill), handle]
+    ]
+    .width(Length::Fixed(ROW_NUMBER_WIDTH))
+    .height(Length::Fill)
     .into()
 }
 
