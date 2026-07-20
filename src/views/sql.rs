@@ -315,13 +315,27 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
             // EXPLAIN result, but the user asked for the raw grid.
             Some(kind) => column![
                 explain_toggle(id, kind, tab.explain_raw),
-                results_grid(b, id, &tab.insights, &tab.col_widths, tab.row_height, tab.page),
+                results_grid(
+                    b,
+                    id,
+                    &tab.insights,
+                    &tab.col_widths,
+                    tab.row_height,
+                    tab.page
+                ),
             ]
             .spacing(6)
             .height(Length::Fill)
             .into(),
             // Ordinary result set.
-            None => results_grid(b, id, &tab.insights, &tab.col_widths, tab.row_height, tab.page),
+            None => results_grid(
+                b,
+                id,
+                &tab.insights,
+                &tab.col_widths,
+                tab.row_height,
+                tab.page,
+            ),
         },
         Some(_) => container(theme::mono_sm("(query returned no rows)"))
             .padding(12)
@@ -364,27 +378,28 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
 /// Modal: pick an export format and its settings, then write the full
 /// (uncapped) query result to a file.
 fn export_overlay<'a>(id: u64, dialog: &'a ExportDialogState) -> Element<'a, Message> {
-    let opts = &dialog.options;
+    let fmt = dialog.format;
 
     // Format selector.
     let mut formats = row![].spacing(6);
     for f in ExportFormat::ALL {
         formats = formats.push(
             button(theme::ui_medium(f.label()).size(12))
-                .style(theme::tab_button(f == opts.format))
+                .style(theme::tab_button(f == fmt))
                 .padding([4, 12])
                 .on_press(SqlMessage::ExportSetFormat(id, f).into()),
         );
     }
 
     // Format-specific settings.
-    let settings: Element<'a, Message> = match opts.format {
+    let settings: Element<'a, Message> = match fmt {
         ExportFormat::Parquet => {
+            let opts = dialog.opts_parquet.clone();
             let mut comps = row![].spacing(6);
             for c in ParquetCompression::ALL {
                 comps = comps.push(
                     button(theme::ui_medium(c.label()).size(12))
-                        .style(theme::tab_button(c == opts.parquet_compression))
+                        .style(theme::tab_button(c == opts.compression))
                         .padding([4, 10])
                         .on_press(SqlMessage::ExportSetCompression(id, c).into()),
                 );
@@ -392,12 +407,12 @@ fn export_overlay<'a>(id: u64, dialog: &'a ExportDialogState) -> Element<'a, Mes
             labelled("Compression", comps.into())
         }
         ExportFormat::Csv => {
-            let header =
-                button(theme::ui_medium(if opts.csv_header { "On" } else { "Off" }).size(12))
-                    .style(theme::tab_button(opts.csv_header))
-                    .padding([4, 12])
-                    .on_press(SqlMessage::ExportToggleHeader(id).into());
-            let delim = text_input("", &(opts.csv_delimiter as char).to_string())
+            let opts = dialog.opts_csv.clone();
+            let header = button(theme::ui_medium(if opts.header { "On" } else { "Off" }).size(12))
+                .style(theme::tab_button(opts.header))
+                .padding([4, 12])
+                .on_press(SqlMessage::ExportToggleHeader(id).into());
+            let delim = text_input("", &(opts.delimiter as char).to_string())
                 .on_input(move |s| SqlMessage::ExportDelimiter(id, s).into())
                 .padding([6, 8])
                 .width(Length::Fixed(60.0));
@@ -409,8 +424,9 @@ fn export_overlay<'a>(id: u64, dialog: &'a ExportDialogState) -> Element<'a, Mes
             .into()
         }
         ExportFormat::Json => {
+            let opts = dialog.opts_json.clone();
             let ndjson = button(
-                theme::ui_medium(if opts.json_ndjson {
+                theme::ui_medium(if opts.ndjson {
                     "NDJSON (one object per line)"
                 } else {
                     "JSON array"

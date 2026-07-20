@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::engine::QueryEngine;
 use crate::explain::ExplainKind;
 use crate::explorer::Explorer;
-use crate::export::ExportOptions;
+use crate::export::{CsvOptions, ExportFormat, JsonOptions, ParquetOptions};
 use crate::flightsql::FlightSqlClient;
 use crate::parquet_io::FileSummary;
 use crate::store::{RecentFile, StateStore};
@@ -348,11 +348,26 @@ impl SqlEditorTab {
 }
 
 /// State of the export-settings modal for one SQL editor tab.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ExportDialogState {
-    pub options: ExportOptions,
+    pub format: ExportFormat,
+    pub opts_parquet: ParquetOptions,
+    pub opts_csv: CsvOptions,
+    pub opts_json: JsonOptions,
     pub in_progress: bool,
     pub error: Option<String>,
+}
+impl Default for ExportDialogState {
+    fn default() -> Self {
+        Self {
+            format: ExportFormat::Parquet,
+            opts_parquet: Default::default(),
+            opts_csv: Default::default(),
+            opts_json: Default::default(),
+            in_progress: false,
+            error: None,
+        }
+    }
 }
 
 /// State of the open autocomplete popup for one editor.

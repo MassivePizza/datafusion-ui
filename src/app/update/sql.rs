@@ -1,6 +1,8 @@
 use iced::Task;
 use iced::widget::text_editor::{Action, Edit, Motion};
 
+use crate::export::{ExportFormat, ExportOptions};
+
 use super::super::*;
 
 impl App {
@@ -228,25 +230,25 @@ impl App {
             }
             SqlMessage::ExportSetFormat(id, fmt) => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.options.format = fmt;
+                    d.format = fmt;
                 }
                 Task::none()
             }
             SqlMessage::ExportSetCompression(id, c) => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.options.parquet_compression = c;
+                    d.opts_parquet.compression = c;
                 }
                 Task::none()
             }
             SqlMessage::ExportToggleHeader(id) => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.options.csv_header = !d.options.csv_header;
+                    d.opts_csv.header = !d.opts_csv.header;
                 }
                 Task::none()
             }
             SqlMessage::ExportToggleNdjson(id) => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.options.json_ndjson = !d.options.json_ndjson;
+                    d.opts_json.ndjson = !d.opts_json.ndjson;
                 }
                 Task::none()
             }
@@ -254,7 +256,7 @@ impl App {
                 if let Some(d) = self.export_dialog_mut(id)
                     && let Some(b) = s.bytes().next()
                 {
-                    d.options.csv_delimiter = b;
+                    d.opts_csv.delimiter = b;
                 }
                 Task::none()
             }
@@ -265,7 +267,7 @@ impl App {
                 let Some(dialog) = t.export_dialog.as_ref() else {
                     return Task::none();
                 };
-                let fmt = dialog.options.format;
+                let fmt = dialog.format;
                 let ext = fmt.extension();
                 let default_name = format!("export.{ext}");
                 let parent = self.window_parent.clone();
@@ -297,13 +299,22 @@ impl App {
                 };
                 dialog.in_progress = true;
                 dialog.error = None;
-                let options = dialog.options;
+                
+                let dialog = dialog.clone();
                 let engine = t.engine.clone();
                 let sql = t.content.text();
                 Task::perform(
                     async move {
                         let stream = engine.export_stream(sql).await?;
-                        Ok(crate::export::write_stream(stream, path, options).await?)
+                        Ok(match dialog.format {
+                            ExportFormat::Parquet => {
+                                dialog.opts_parquet.write_stream(stream, path).await?
+                            }
+                            ExportFormat::Csv => dialog.opts_csv.write_stream(stream, path).await?,
+                            ExportFormat::Json => {
+                                dialog.opts_json.write_stream(stream, path).await?
+                            }
+                        })
                     },
                     move |result| SqlMessage::ExportCompleted { id, result }.into(),
                 )
