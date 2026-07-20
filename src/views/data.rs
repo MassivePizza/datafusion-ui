@@ -696,13 +696,10 @@ fn row_number_cell<'a>(n: usize, zebra: bool, row_height: f32, id: u64) -> Eleme
         GridMessage::RowResizeEnd { id }.into(),
         GridMessage::RowHeightReset { id }.into(),
     );
-    stack![
-        number,
-        column![Space::new().height(Length::Fill), handle]
-    ]
-    .width(Length::Fixed(ROW_NUMBER_WIDTH))
-    .height(Length::Fill)
-    .into()
+    stack![number, column![Space::new().height(Length::Fill), handle]]
+        .width(Length::Fixed(ROW_NUMBER_WIDTH))
+        .height(Length::Fill)
+        .into()
 }
 
 fn tooltip_box<'a>(content: String) -> Element<'a, Message> {
