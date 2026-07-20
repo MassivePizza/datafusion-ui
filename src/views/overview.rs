@@ -2,7 +2,7 @@ use arrow::datatypes::{DataType, Field};
 use iced::widget::container::Style as ContainerStyle;
 use iced::widget::text::Wrapping;
 use iced::widget::{Space, button, column, container, mouse_area, row, text, tooltip};
-use iced::{Background, Border, Element, Length, Theme};
+use iced::{Background, Border, Color, Element, Length, Theme, color};
 use parquet::file::metadata::SortingColumn;
 
 use crate::app::{FileMessage, Message};
@@ -41,13 +41,10 @@ pub fn view<'a>(
             meta.created_by().unwrap_or("(unknown)").to_string()
         ),
         section("Storage"),
+        kv("Raw (sum)", human_bytes(uncompressed.max(0) as u64)),
+        kv("Packed (sum)", human_bytes(compressed.max(0) as u64)),
         kv(
-            "Uncompressed (sum)",
-            human_bytes(uncompressed.max(0) as u64)
-        ),
-        kv("Compressed (sum)", human_bytes(compressed.max(0) as u64)),
-        kv(
-            "Compression ratio",
+            "Pack ratio",
             if compressed > 0 {
                 format!("{:.2}x", uncompressed as f64 / compressed as f64)
             } else {
@@ -76,28 +73,62 @@ pub fn view<'a>(
     col.into()
 }
 
-pub fn format_sorting_columns(file: &FileSummary, cols: &[SortingColumn]) -> String {
-    if cols.is_empty() {
-        return "(none specified)".into();
+pub struct SortText<'a> {
+    label: &'a str,
+    color: Option<Color>,
+}
+impl<'a> SortText<'a> {
+    pub fn new(label: &'a str, color: Color) -> Self {
+        SortText {
+            label,
+            color: Some(color),
+        }
     }
-    cols.iter()
-        .map(|sc| {
-            let name = file
-                .schema
-                .fields()
-                .get(sc.column_idx as usize)
-                .map(|f| f.name().as_str())
-                .unwrap_or("?");
-            let dir = if sc.descending { "DESC" } else { "ASC" };
-            let nulls = if sc.nulls_first {
-                "NULLS FIRST"
-            } else {
-                "NULLS LAST"
-            };
-            format!("{name} {dir} {nulls}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+}
+impl<'a> From<&'a str> for SortText<'a> {
+    fn from(label: &'a str) -> Self {
+        SortText { label, color: None }
+    }
+}
+impl<'a> From<SortText<'a>> for text::Text<'a> {
+    fn from(value: SortText<'a>) -> Self {
+        text(value.label).color_maybe(value.color)
+    }
+}
+
+pub fn format_sorting_columns<'a>(
+    file: &'a FileSummary,
+    cols: &[SortingColumn],
+) -> Vec<SortText<'a>> {
+    if cols.is_empty() {
+        return vec!["(none specified)".into()];
+    }
+    let mut result = vec![];
+    for (idx, sc) in cols.iter().enumerate() {
+        if idx > 0 {
+            result.push(SortText::new(", ", color!(0xffaaaa)));
+        }
+
+        let name = file
+            .schema
+            .fields()
+            .get(sc.column_idx as usize)
+            .map(|f| f.name().as_str())
+            .unwrap_or("?");
+
+        let dir = if sc.descending {
+            SortText::new(" DESC", color!(0xff4000))
+        } else {
+            SortText::new(" ASC", color!(0x00ff00))
+        };
+
+        result.push(SortText::from(name));
+        result.push(dir);
+        if sc.nulls_first {
+            result.push(SortText::new(" NULL UP", color!(0xff00ff)));
+        }
+    }
+    result
 }
 
 fn sort_order_summary(file: &FileSummary) -> String {
@@ -122,6 +153,9 @@ fn sort_order_summary(file: &FileSummary) -> String {
         (true, true) => {
             let cols = groups[0].sorting_columns().unwrap();
             format_sorting_columns(file, cols)
+                .iter()
+                .map(|text| text.label)
+                .collect()
         }
         (_, false) => "(varies by row group — see Row Groups tab)".into(),
     }
