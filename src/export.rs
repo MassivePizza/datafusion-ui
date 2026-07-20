@@ -87,23 +87,59 @@ impl ParquetCompression {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ExportOptions {
-    pub format: ExportFormat,
-    pub parquet_compression: ParquetCompression,
-    pub csv_header: bool,
-    pub csv_delimiter: u8,
-    /// JSON: newline-delimited (one object per line) vs a single JSON array.
-    pub json_ndjson: bool,
+pub struct ParquetOptions {
+    pub compression: ParquetCompression,
+}
+impl Default for ParquetOptions {
+    fn default() -> Self {
+        Self {
+            compression: ParquetCompression::Zstd,
+        }
+    }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CsvOptions {
+    pub header: bool,
+    pub delimiter: u8,
+}
+impl Default for CsvOptions {
+    fn default() -> Self {
+        Self {
+            header: true,
+            delimiter: b',',
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct JsonOptions {
+    /// JSON: newline-delimited (one object per line) vs a single JSON array.
+    pub ndjson: bool,
+}
+impl Default for JsonOptions {
+    fn default() -> Self {
+        Self { ndjson: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ExportOptions {
+    Parquet(ParquetOptions),
+    Csv(CsvOptions),
+    Json(JsonOptions),
+}
 impl Default for ExportOptions {
     fn default() -> Self {
-        ExportOptions {
-            format: ExportFormat::Parquet,
-            parquet_compression: ParquetCompression::Zstd,
-            csv_header: true,
-            csv_delimiter: b',',
-            json_ndjson: true,
+        ExportOptions::Parquet(Default::default())
+    }
+}
+impl ExportOptions {
+    pub fn format(&self) -> ExportFormat {
+        match self {
+            ExportOptions::Parquet(_) => ExportFormat::Parquet,
+            ExportOptions::Csv(_) => ExportFormat::Csv,
+            ExportOptions::Json(_) => ExportFormat::Json,
         }
     }
 }
@@ -118,17 +154,17 @@ pub async fn write_stream(
 ) -> Result<PathBuf, ExportError> {
     let schema = stream.schema();
     let file = File::create(&path).map_err(|e| ExportError::CreateFile(e.to_string()))?;
-    tracing::info!(dest = %path.display(), format = ?opts.format, "exporting query result");
+    tracing::info!(dest = %path.display(), format = ?opts.format(), "exporting query result");
 
     let write = |op: &'static str, e: &dyn std::fmt::Display| ExportError::Write {
         op,
         msg: e.to_string(),
     };
 
-    match opts.format {
-        ExportFormat::Parquet => {
+    match opts {
+        ExportOptions::Parquet(opts) => {
             let props = WriterProperties::builder()
-                .set_compression(opts.parquet_compression.to_parquet())
+                .set_compression(opts.compression.to_parquet())
                 .build();
             let mut writer = ArrowWriter::try_new(file, schema, Some(props))
                 .map_err(|e| write("open parquet writer", &e))?;
@@ -140,18 +176,18 @@ pub async fn write_stream(
             }
             writer.close().map_err(|e| write("finish parquet", &e))?;
         }
-        ExportFormat::Csv => {
+        ExportOptions::Csv(opts) => {
             let mut writer = CsvWriterBuilder::new()
-                .with_header(opts.csv_header)
-                .with_delimiter(opts.csv_delimiter)
+                .with_header(opts.header)
+                .with_delimiter(opts.delimiter)
                 .build(file);
             while let Some(batch) = stream.next().await {
                 let batch = batch.map_err(|e| write("read batch", &e))?;
                 writer.write(&batch).map_err(|e| write("write csv", &e))?;
             }
         }
-        ExportFormat::Json => {
-            if opts.json_ndjson {
+        ExportOptions::Json(opts) => {
+            if opts.ndjson {
                 let mut writer = LineDelimitedWriter::new(file);
                 while let Some(batch) = stream.next().await {
                     let batch = batch.map_err(|e| write("read batch", &e))?;
