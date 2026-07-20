@@ -7,6 +7,7 @@ mod explorer;
 mod export;
 mod flightsql;
 mod format;
+mod hex;
 mod parquet_io;
 mod sqlide_highlight;
 mod store;
