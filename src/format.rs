@@ -5,6 +5,9 @@ use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 
+use crate::hex::{HexCasing, bytes_to_hex};
+use crate::views::cell::CellString;
+
 pub fn default_options() -> FormatOptions<'static> {
     FormatOptions::default()
         .with_display_error(true)
@@ -548,5 +551,32 @@ pub fn human_bytes(bytes: u64) -> String {
         format!("{} {}", bytes, UNITS[0])
     } else {
         format!("{:.2} {}", value, UNITS[unit])
+    }
+}
+
+pub fn bytes_view(data: &[u8]) -> CellString {
+    match str::from_utf8(data) {
+        Ok(text) if text.is_ascii() => {
+            let mut s = String::with_capacity(2 + text.len());
+            s.push('"');
+            let mut words = text.split_ascii_whitespace();
+            if let Some(word) = words.next() {
+                s.push_str(word);
+            }
+            for word in words {
+                s.push(' ');
+                s.push_str(word);
+            }
+            s.push('"');
+            CellString::new(text.to_owned(), s)
+        }
+        _ => {
+            let mut s = Vec::with_capacity(2 + data.len() * 2);
+            s.extend_from_slice(b"0x");
+            s.extend(bytes_to_hex(data.iter().cloned(), HexCasing::Upper));
+
+            // SAFETY: we only produce ASCII
+            unsafe { String::from_utf8_unchecked(s) }.into()
+        }
     }
 }
