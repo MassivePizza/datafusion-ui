@@ -2133,6 +2133,7 @@ dependencies = [
  "dark-light",
  "datafusion",
  "futures",
+ "hex",
  "human-panic",
  "iced",
  "parquet",

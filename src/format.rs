@@ -5,6 +5,8 @@ use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 
+use crate::views::cell::CellString;
+
 pub fn default_options() -> FormatOptions<'static> {
     FormatOptions::default()
         .with_display_error(true)
@@ -548,5 +550,30 @@ pub fn human_bytes(bytes: u64) -> String {
         format!("{} {}", bytes, UNITS[0])
     } else {
         format!("{:.2} {}", value, UNITS[unit])
+    }
+}
+
+pub fn bytes_view(data: &[u8]) -> CellString {
+    match str::from_utf8(data) {
+        Ok(text) if text.is_ascii() => {
+            let mut s = String::with_capacity(2 + text.len());
+            s.push('"');
+            let mut words = text.split_ascii_whitespace();
+            if let Some(word) = words.next() {
+                s.push_str(word);
+            }
+            for word in words {
+                s.push(' ');
+                s.push_str(word);
+            }
+            s.push('"');
+            CellString::new(text.to_owned(), s)
+        }
+        _ => {
+            let mut s = String::with_capacity(2 + data.len() * 2);
+            s.push_str("0x");
+            s.push_str(&hex::encode_upper(data));
+            s.into()
+        }
     }
 }

@@ -1,3 +1,4 @@
+pub mod cell;
 pub mod conn_info;
 pub mod data;
 pub mod explain;
