@@ -240,15 +240,35 @@ impl App {
                 }
                 Task::none()
             }
-            SqlMessage::ExportToggleHeader(id) => {
+            SqlMessage::ExportParquetColumnName(id, column) => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.opts_csv.header = !d.opts_csv.header;
+                    d.parquet_column_name = column;
                 }
                 Task::none()
             }
-            SqlMessage::ExportToggleNdjson(id) => {
+            SqlMessage::ExportParquetColumnOptions {
+                id,
+                column,
+                options,
+            } => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.opts_json.ndjson = !d.opts_json.ndjson;
+                    if let Some(options) = options {
+                        d.opts_parquet.per_column_options.insert(column, options);
+                    } else {
+                        d.opts_parquet.per_column_options.remove(&column);
+                    }
+                }
+                Task::none()
+            }
+            SqlMessage::ExportToggleHeader(id, value) => {
+                if let Some(d) = self.export_dialog_mut(id) {
+                    d.opts_csv.header = value;
+                }
+                Task::none()
+            }
+            SqlMessage::ExportToggleNdjson(id, value) => {
+                if let Some(d) = self.export_dialog_mut(id) {
+                    d.opts_json.ndjson = value;
                 }
                 Task::none()
             }

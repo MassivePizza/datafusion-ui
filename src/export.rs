@@ -57,6 +57,11 @@ pub enum ParquetCompression {
     Zstd,
     Lz4,
 }
+impl std::fmt::Display for ParquetCompression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
 impl ParquetCompression {
     pub const ALL: [ParquetCompression; 5] = [
         ParquetCompression::None,
@@ -66,7 +71,7 @@ impl ParquetCompression {
         ParquetCompression::Lz4,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             ParquetCompression::None => "None",
             ParquetCompression::Snappy => "Snappy",
@@ -76,7 +81,7 @@ impl ParquetCompression {
         }
     }
 
-    fn to_parquet(&self) -> Compression {
+    fn to_parquet(self) -> Compression {
         match self {
             ParquetCompression::None => Compression::UNCOMPRESSED,
             ParquetCompression::Snappy => Compression::SNAPPY,
@@ -172,7 +177,7 @@ impl ExportOptions for ParquetOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ParquetColumnOptions {
     pub compression: Option<ParquetCompression>,
     pub encoding: Option<parquet::basic::Encoding>,

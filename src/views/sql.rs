@@ -2,14 +2,17 @@
 //! source), the active editor + results grid, a shared in-memory query-history
 //! panel, and the FlightSQL connect modal. Styling reuses `crate::theme`.
 
+use std::time::Duration;
+
+use iced::alignment::Vertical;
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::widget::container::Style as ContainerStyle;
 use iced::widget::text::Wrapping;
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
-    Space, button, column, container, mouse_area, opaque, pin, row, scrollable, stack, text,
-    text_editor, text_input,
+    Space, button, checkbox, column, container, mouse_area, opaque, pick_list, pin, row,
+    scrollable, stack, text, text_editor, text_input, toggler,
 };
 use iced::{Background, Border, Color, Element, Length, Theme};
 use sql_ide::CompletionKind;
@@ -18,10 +21,10 @@ use crate::app::{
     App, AuthKind, CompletionState, ConnectForm, ExportDialogState, FlightMessage, HistoryStatus,
     Message, RESULT_PAGE_SIZE, SourceRef, SqlEditorTab, SqlMessage,
 };
-use crate::export::{ExportFormat, ParquetCompression};
+use crate::export::{ExportFormat, ParquetColumnOptions, ParquetCompression};
 use crate::sqlide_highlight::SqlHighlighter;
-use crate::theme;
 use crate::theme::palette;
+use crate::theme::{self, FONT_UI_MEDIUM};
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let strip = editor_tab_strip(app);
@@ -379,6 +382,39 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum TriState {
+    Default,
+    Yes,
+    No,
+}
+impl std::fmt::Display for TriState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+impl From<TriState> for Option<bool> {
+    fn from(value: TriState) -> Self {
+        match value {
+            TriState::Default => None,
+            TriState::Yes => Some(true),
+            TriState::No => Some(false),
+        }
+    }
+}
+impl From<Option<bool>> for TriState {
+    fn from(value: Option<bool>) -> Self {
+        match value {
+            Some(true) => TriState::Yes,
+            Some(false) => TriState::No,
+            None => TriState::Default,
+        }
+    }
+}
+impl TriState {
+    const ALL: &[TriState] = &[Self::Default, Self::Yes, Self::No];
+}
+
 /// Modal: pick an export format and its settings, then write the full
 /// (uncapped) query result to a file.
 fn export_overlay<'a>(id: u64, dialog: &'a ExportDialogState) -> Element<'a, Message> {
@@ -398,28 +434,115 @@ fn export_overlay<'a>(id: u64, dialog: &'a ExportDialogState) -> Element<'a, Mes
     // Format-specific settings.
     let settings: Element<'a, Message> = match fmt {
         ExportFormat::Parquet => {
-            let opts = dialog.opts_parquet.clone();
-            let mut comps = row![].spacing(6);
-            for c in ParquetCompression::ALL {
-                comps = comps.push(
-                    button(theme::ui_medium(c.label()).size(12))
-                        .style(theme::tab_button(c == opts.compression))
-                        .padding([4, 10])
-                        .on_press(SqlMessage::ExportSetCompression(id, c).into()),
+            let opts = &dialog.opts_parquet;
+
+            let comp = pick_list(
+                ParquetCompression::ALL.as_slice(),
+                Some(opts.compression),
+                move |c| SqlMessage::ExportSetCompression(id, c).into(),
+            );
+
+            let col_name = text_input("Configure column...", &dialog.parquet_column_name)
+                .on_input(move |s| SqlMessage::ExportParquetColumnName(id, s).into())
+                .on_submit(
+                    SqlMessage::ExportParquetColumnOptions {
+                        id,
+                        column: dialog.parquet_column_name.clone(),
+                        options: Some(ParquetColumnOptions::default()),
+                    }
+                    .into(),
                 );
+
+            let col_opts_header = row![theme::label_text("Column options"), col_name]
+                .spacing(6)
+                .align_y(Vertical::Center);
+
+            let mut col_opts = column![].spacing(12);
+
+            for (col, opts) in opts.per_column_options.iter() {
+                let label = text(col).font(FONT_UI_MEDIUM).size(12);
+                let remove = button(theme::ui_medium("x"))
+                    .style(theme::danger_button)
+                    .padding(4)
+                    .on_press(
+                        SqlMessage::ExportParquetColumnOptions {
+                            id,
+                            column: col.clone(),
+                            options: None,
+                        }
+                        .into(),
+                    );
+
+                let comp = pick_list(
+                    ParquetCompression::ALL.as_slice(),
+                    opts.compression,
+                    move |c| {
+                        SqlMessage::ExportParquetColumnOptions {
+                            id,
+                            column: col.clone(),
+                            options: Some(ParquetColumnOptions {
+                                compression: Some(c),
+                                ..opts.clone()
+                            }),
+                        }
+                        .into()
+                    },
+                );
+                let dict = pick_list(
+                    TriState::ALL,
+                    Some(TriState::from(opts.dictionary_enabled)),
+                    move |c| {
+                        SqlMessage::ExportParquetColumnOptions {
+                            id,
+                            column: col.clone(),
+                            options: Some(ParquetColumnOptions {
+                                dictionary_enabled: c.into(),
+                                ..opts.clone()
+                            }),
+                        }
+                        .into()
+                    },
+                );
+
+                col_opts = col_opts.push(column![
+                    row![remove, labelled("Column", label.into())]
+                        .align_y(Vertical::Center)
+                        .spacing(8),
+                    column![
+                        labelled("Compression", comp.into()),
+                        labelled("Dictionary", dict.into())
+                    ]
+                    .padding([0, 12]),
+                ]);
             }
-            labelled("Compression", comps.into())
+
+            let col_opts = scrollable(col_opts).width(Length::Fill).height(
+                if opts.per_column_options.is_empty() {
+                    Length::Shrink
+                } else {
+                    Length::Fixed(150.0)
+                },
+            );
+
+            column![
+                labelled("Compression", comp.into()),
+                col_opts_header,
+                col_opts
+            ]
+            .spacing(12)
+            .into()
         }
         ExportFormat::Csv => {
-            let opts = dialog.opts_csv.clone();
-            let header = button(theme::ui_medium(if opts.header { "On" } else { "Off" }).size(12))
-                .style(theme::tab_button(opts.header))
-                .padding([4, 12])
-                .on_press(SqlMessage::ExportToggleHeader(id).into());
+            let opts = &dialog.opts_csv;
+
+            let header = checkbox(opts.header)
+                .on_toggle(move |b| SqlMessage::ExportToggleHeader(id, b).into());
+
             let delim = text_input("", &(opts.delimiter as char).to_string())
                 .on_input(move |s| SqlMessage::ExportDelimiter(id, s).into())
                 .padding([6, 8])
-                .width(Length::Fixed(60.0));
+                .width(Length::Fixed(40.0));
+
             column![
                 labelled("Header row", header.into()),
                 labelled("Delimiter", delim.into()),
@@ -428,18 +551,18 @@ fn export_overlay<'a>(id: u64, dialog: &'a ExportDialogState) -> Element<'a, Mes
             .into()
         }
         ExportFormat::Json => {
-            let opts = dialog.opts_json.clone();
-            let ndjson = button(
-                theme::ui_medium(if opts.ndjson {
+            let opts = &dialog.opts_json;
+
+            let ndjson = toggler(opts.ndjson)
+                .label(if opts.ndjson {
                     "NDJSON (one object per line)"
                 } else {
                     "JSON array"
                 })
-                .size(12),
-            )
-            .style(theme::tab_button(true))
-            .padding([4, 12])
-            .on_press(SqlMessage::ExportToggleNdjson(id).into());
+                .font(FONT_UI_MEDIUM)
+                .text_size(12)
+                .on_toggle(move |b| SqlMessage::ExportToggleNdjson(id, b).into());
+
             labelled("Layout", ndjson.into())
         }
     };
@@ -928,7 +1051,10 @@ fn auth_button<'a>(label: &'a str, kind: AuthKind, current: AuthKind) -> Element
 }
 
 fn labelled<'a>(label: &'a str, child: Element<'a, Message>) -> Element<'a, Message> {
-    column![theme::label_text(label), child].spacing(4).into()
+    row![theme::label_text(label), child]
+        .spacing(6)
+        .align_y(Vertical::Center)
+        .into()
 }
 
 // -- helpers ------------------------------------------------------------------

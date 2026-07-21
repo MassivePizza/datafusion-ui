@@ -356,6 +356,7 @@ pub struct ExportDialogState {
     pub opts_json: JsonOptions,
     pub in_progress: bool,
     pub error: Option<String>,
+    pub parquet_column_name: String,
 }
 impl Default for ExportDialogState {
     fn default() -> Self {
@@ -366,6 +367,7 @@ impl Default for ExportDialogState {
             opts_json: Default::default(),
             in_progress: false,
             error: None,
+            parquet_column_name: String::new(),
         }
     }
 }
