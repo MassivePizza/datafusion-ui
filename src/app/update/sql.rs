@@ -299,7 +299,7 @@ impl App {
                 };
                 dialog.in_progress = true;
                 dialog.error = None;
-                
+
                 let dialog = dialog.clone();
                 let engine = t.engine.clone();
                 let sql = t.content.text();
@@ -346,7 +346,7 @@ impl App {
                 id,
                 sql,
                 source_label,
-                elapsed_ms,
+                elapsed_ns,
                 result,
             } => {
                 let (status, row_count) = match &result {
@@ -363,7 +363,7 @@ impl App {
                 if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id) {
                     t.running = false;
                     t.query_handle = None;
-                    t.last_elapsed_ms = Some(elapsed_ms);
+                    t.last_elapsed_ns = Some(elapsed_ns);
                     t.explain = explain_kind;
                     match result {
                         Ok(r) => {
@@ -397,7 +397,7 @@ impl App {
                     source_label,
                     status,
                     row_count,
-                    elapsed_ms,
+                    elapsed_ns,
                     ran_at: SystemTime::now(),
                 });
                 // Refresh the queryable `history` table to include this run.

@@ -230,8 +230,8 @@ pub struct SqlEditorTab {
     pub batch: Option<RecordBatch>,
     pub schema: Option<SchemaRef>,
     pub error: Option<String>,
-    pub last_row_count: Option<usize>,
-    pub last_elapsed_ms: Option<u128>,
+    pub last_row_count: Option<i64>,
+    pub last_elapsed_ns: Option<u64>,
     pub truncated: bool,
     /// Open autocomplete popup, if any.
     pub completion: Option<CompletionState>,
@@ -409,8 +409,8 @@ pub struct QueryHistoryEntry {
     pub sql: String,
     pub source_label: String,
     pub status: HistoryStatus,
-    pub row_count: Option<usize>,
-    pub elapsed_ms: u128,
+    pub row_count: Option<i64>,
+    pub elapsed_ns: u64,
     pub ran_at: SystemTime,
 }
 

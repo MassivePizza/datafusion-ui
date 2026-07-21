@@ -91,7 +91,7 @@ pub enum SqlMessage {
         id: u64,
         sql: String,
         source_label: String,
-        elapsed_ms: u128,
+        elapsed_ns: u64,
         result: Result<QueryResult, AppError>,
     },
     ExportOpen(u64),

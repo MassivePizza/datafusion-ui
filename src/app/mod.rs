@@ -339,7 +339,7 @@ impl App {
             schema: None,
             error: None,
             last_row_count: None,
-            last_elapsed_ms: None,
+            last_elapsed_ns: None,
             truncated: false,
             completion: None,
             diagnostics: Vec::new(),
@@ -387,14 +387,15 @@ impl App {
         let (task, handle) = Task::perform(
             async move {
                 let result = engine.run_query(sql.clone(), cap).await;
-                (sql, source_label, started.elapsed().as_millis(), result)
+                let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap();
+                (sql, source_label, nanos, result)
             },
-            move |(sql, source_label, elapsed_ms, result)| {
+            move |(sql, source_label, elapsed_ns, result)| {
                 SqlMessage::Completed {
                     id,
                     sql,
                     source_label,
-                    elapsed_ms,
+                    elapsed_ns,
                     result,
                 }
                 .into()

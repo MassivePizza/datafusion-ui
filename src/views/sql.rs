@@ -236,11 +236,15 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
 
     let meta: Element<'_, Message> = if tab.running {
         theme::mono_sm("running…").wrapping(Wrapping::None).into()
-    } else if let (Some(ms), Some(rows)) = (tab.last_elapsed_ms, tab.last_row_count) {
-        theme::mono_sm(format!("{} rows · {} ms", count(rows as i64), ms))
-            .wrapping(Wrapping::None)
-            .style(muted)
-            .into()
+    } else if let (Some(ns), Some(rows)) = (tab.last_elapsed_ns, tab.last_row_count) {
+        theme::mono_sm(format!(
+            "{} rows · {:?}",
+            count(rows),
+            Duration::from_nanos(ns)
+        ))
+        .wrapping(Wrapping::None)
+        .style(muted)
+        .into()
     } else {
         Space::new().width(Length::Fixed(0.0)).into()
     };
@@ -249,7 +253,7 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
         container(
             theme::mono_sm(format!(
                 "first {} rows (capped)",
-                count(tab.last_row_count.unwrap_or(0) as i64)
+                count(tab.last_row_count.unwrap_or(0))
             ))
             .wrapping(Wrapping::None),
         )
@@ -754,7 +758,7 @@ fn history_row<'a>(i: usize, entry: &'a crate::app::QueryHistoryEntry) -> Elemen
     let preview = theme::mono_sm(elide_oneline(&entry.sql, 52)).wrapping(Wrapping::None);
 
     let rows_label = match (&entry.status, entry.row_count) {
-        (HistoryStatus::Ok, Some(r)) => format!("{} rows", count(r as i64)),
+        (HistoryStatus::Ok, Some(r)) => format!("{} rows", count(r)),
         (HistoryStatus::Err(e), _) => format!("error: {}", elide_oneline(e, 28)),
         _ => "—".to_string(),
     };
@@ -762,7 +766,7 @@ fn history_row<'a>(i: usize, entry: &'a crate::app::QueryHistoryEntry) -> Elemen
         "{} · {} · {} ms · {}",
         entry.source_label,
         rows_label,
-        entry.elapsed_ms,
+        entry.elapsed_ns,
         relative_time(entry.ran_at),
     ))
     .size(10)
