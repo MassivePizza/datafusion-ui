@@ -2,6 +2,7 @@ use iced::widget::container::Style as ContainerStyle;
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, button, column, container, mouse_area, row, text};
 use iced::{Background, Border, Element, Length, Theme};
+use parquet::basic::Compression;
 use parquet::file::metadata::ColumnChunkMetaData;
 use parquet::file::statistics::Statistics;
 
@@ -91,7 +92,9 @@ fn column_chunk_table(file: &FileSummary, rg_idx: usize) -> Element<'_, Message>
         CcColumn::new("Packed", 100.into(), |cc| {
             human_bytes(cc.compressed_size().max(0) as u64)
         }),
-        CcColumn::new("Comp", 50.into(), |cc| format!("{:?}", cc.compression())),
+        CcColumn::new("Comp", 50.into(), |cc| {
+            format_compression(cc.compression()).to_string()
+        }),
         CcColumn::new("Coding", 100.into(), |cc| {
             cc.encodings()
                 .map(|e| format!("{e:?}"))
@@ -128,7 +131,18 @@ fn column_chunk_table(file: &FileSummary, rg_idx: usize) -> Element<'_, Message>
 
     container(table).padding([4, 40]).into()
 }
-
+fn format_compression(compression: Compression) -> &'static str {
+    match compression {
+        Compression::UNCOMPRESSED => "Uncompressed",
+        Compression::SNAPPY => "Snappy",
+        Compression::GZIP(_) => "Gzip",
+        Compression::LZO => "LZO",
+        Compression::BROTLI(_) => "Brotli",
+        Compression::LZ4 => "LZ4",
+        Compression::ZSTD(_) => "Zstd",
+        Compression::LZ4_RAW => "LZ4_Raw",
+    }
+}
 pub struct CcColumn<'a, 'b> {
     element: Option<Element<'a, Message>>,
     width: Length,

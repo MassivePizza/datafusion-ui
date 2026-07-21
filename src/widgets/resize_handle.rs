@@ -134,8 +134,7 @@ where
         _renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let Size { width, height } =
-            <Self as Widget<Message, Theme, Renderer>>::size(self);
+        let Size { width, height } = <Self as Widget<Message, Theme, Renderer>>::size(self);
         layout::atomic(limits, width, height)
     }
 
@@ -190,8 +189,8 @@ where
                         Axis::Horizontal => position.x,
                         Axis::Vertical => position.y,
                     };
-                    let new_size = (drag.press_size + (coord - drag.press_coord))
-                        .clamp(self.min, self.max);
+                    let new_size =
+                        (drag.press_size + (coord - drag.press_coord)).clamp(self.min, self.max);
                     shell.publish((self.on_resize)(new_size));
                     shell.request_redraw();
                     shell.capture_event();

@@ -315,13 +315,27 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
             // EXPLAIN result, but the user asked for the raw grid.
             Some(kind) => column![
                 explain_toggle(id, kind, tab.explain_raw),
-                results_grid(b, id, &tab.insights, &tab.col_widths, tab.row_height, tab.page),
+                results_grid(
+                    b,
+                    id,
+                    &tab.insights,
+                    &tab.col_widths,
+                    tab.row_height,
+                    tab.page
+                ),
             ]
             .spacing(6)
             .height(Length::Fill)
             .into(),
             // Ordinary result set.
-            None => results_grid(b, id, &tab.insights, &tab.col_widths, tab.row_height, tab.page),
+            None => results_grid(
+                b,
+                id,
+                &tab.insights,
+                &tab.col_widths,
+                tab.row_height,
+                tab.page,
+            ),
         },
         Some(_) => container(theme::mono_sm("(query returned no rows)"))
             .padding(12)
