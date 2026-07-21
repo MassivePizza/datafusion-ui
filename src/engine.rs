@@ -24,7 +24,7 @@ pub enum QueryEngine {
 pub struct QueryResult {
     pub batch: RecordBatch,
     pub schema: SchemaRef,
-    pub row_count: usize,
+    pub row_count: i64,
     /// True if the result was cut short at the row cap.
     pub truncated: bool,
 }
@@ -45,7 +45,7 @@ impl QueryEngine {
             QueryEngine::Local(session) => run_sql_capped_on(&session.ctx, sql, cap).await?,
             QueryEngine::Flight(client) => client.run_sql(sql, cap).await?,
         };
-        let row_count = batch.num_rows();
+        let row_count = batch.num_rows() as i64;
         Ok(QueryResult {
             batch,
             schema,

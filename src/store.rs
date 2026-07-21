@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use arrow::array::{Array, Float32Array, Int32Array, Int64Array, StringArray};
+use arrow::array::{Array, Float32Array, Int32Array, Int64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -135,7 +135,7 @@ impl StateStore {
             let status = str_col(&batch, "status");
             let error = str_col(&batch, "error");
             let row_count = i64_col(&batch, "row_count");
-            let elapsed = i64_col(&batch, "elapsed_ms");
+            let elapsed = u64_col(&batch, "elapsed_ms");
             let ran_at = i64_col(&batch, "ran_at_ms");
             for r in 0..batch.num_rows() {
                 let status = match get_str(&status, r) {
@@ -148,8 +148,8 @@ impl StateStore {
                     sql: get_str(&sql, r).unwrap_or_default().to_string(),
                     source_label: get_str(&source, r).unwrap_or_default().to_string(),
                     status,
-                    row_count: get_i64(&row_count, r).map(|v| v as usize),
-                    elapsed_ms: get_i64(&elapsed, r).unwrap_or(0) as u128,
+                    row_count: get_i64(&row_count, r),
+                    elapsed_ns: get_u64(&elapsed, r).unwrap_or(0),
                     ran_at: millis_to_systemtime(get_i64(&ran_at, r).unwrap_or(0)),
                 });
             }
@@ -182,13 +182,8 @@ impl StateStore {
                 })
                 .collect::<Vec<_>>(),
         );
-        let row_count = Int64Array::from(
-            entries
-                .iter()
-                .map(|e| e.row_count.map(|v| v as i64))
-                .collect::<Vec<_>>(),
-        );
-        let elapsed = Int64Array::from_iter_values(entries.iter().map(|e| e.elapsed_ms as i64));
+        let row_count = Int64Array::from(entries.iter().map(|e| e.row_count).collect::<Vec<_>>());
+        let elapsed = Int64Array::from_iter_values(entries.iter().map(|e| e.elapsed_ns as i64));
         let ran_at =
             Int64Array::from_iter_values(entries.iter().map(|e| systemtime_to_millis(e.ran_at)));
         match RecordBatch::try_new(
@@ -388,6 +383,10 @@ fn get_i64(a: &Int64Array, r: usize) -> Option<i64> {
     (r < a.len() && a.is_valid(r)).then(|| a.value(r))
 }
 
+fn get_u64(a: &UInt64Array, r: usize) -> Option<u64> {
+    (r < a.len() && a.is_valid(r)).then(|| a.value(r))
+}
+
 fn get_i32(a: &Int32Array, r: usize) -> Option<i32> {
     (r < a.len() && a.is_valid(r)).then(|| a.value(r))
 }
@@ -419,6 +418,7 @@ macro_rules! get_col_or_null {
 get_col_or_null!(
     str_col(StringArray),
     i64_col(Int64Array),
+    u64_col(UInt64Array),
     i32_col(Int32Array),
     f32_col(Float32Array)
 );
@@ -444,7 +444,7 @@ mod tests {
                 source_label: "local session".into(),
                 status: HistoryStatus::Ok,
                 row_count: Some(1),
-                elapsed_ms: 12,
+                elapsed_ns: 12,
                 ran_at: UNIX_EPOCH + Duration::from_millis(1_700_000_000_000),
             },
             QueryHistoryEntry {
@@ -452,7 +452,7 @@ mod tests {
                 source_label: "flight: x".into(),
                 status: HistoryStatus::Err("boom".into()),
                 row_count: None,
-                elapsed_ms: 3,
+                elapsed_ns: 3,
                 ran_at: UNIX_EPOCH + Duration::from_millis(1_700_000_001_000),
             },
         ];

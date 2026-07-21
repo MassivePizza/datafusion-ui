@@ -1,6 +1,8 @@
 use iced::Task;
 use iced::widget::text_editor::{Action, Edit, Motion};
 
+use crate::export::{ExportFormat, ExportOptions};
+
 use super::super::*;
 
 impl App {
@@ -228,25 +230,45 @@ impl App {
             }
             SqlMessage::ExportSetFormat(id, fmt) => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.options.format = fmt;
+                    d.format = fmt;
                 }
                 Task::none()
             }
             SqlMessage::ExportSetCompression(id, c) => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.options.parquet_compression = c;
+                    d.opts_parquet.compression = c;
                 }
                 Task::none()
             }
-            SqlMessage::ExportToggleHeader(id) => {
+            SqlMessage::ExportParquetColumnName(id, column) => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.options.csv_header = !d.options.csv_header;
+                    d.parquet_column_name = column;
                 }
                 Task::none()
             }
-            SqlMessage::ExportToggleNdjson(id) => {
+            SqlMessage::ExportParquetColumnOptions {
+                id,
+                column,
+                options,
+            } => {
                 if let Some(d) = self.export_dialog_mut(id) {
-                    d.options.json_ndjson = !d.options.json_ndjson;
+                    if let Some(options) = options {
+                        d.opts_parquet.per_column_options.insert(column, options);
+                    } else {
+                        d.opts_parquet.per_column_options.remove(&column);
+                    }
+                }
+                Task::none()
+            }
+            SqlMessage::ExportToggleHeader(id, value) => {
+                if let Some(d) = self.export_dialog_mut(id) {
+                    d.opts_csv.header = value;
+                }
+                Task::none()
+            }
+            SqlMessage::ExportToggleNdjson(id, value) => {
+                if let Some(d) = self.export_dialog_mut(id) {
+                    d.opts_json.ndjson = value;
                 }
                 Task::none()
             }
@@ -254,7 +276,7 @@ impl App {
                 if let Some(d) = self.export_dialog_mut(id)
                     && let Some(b) = s.bytes().next()
                 {
-                    d.options.csv_delimiter = b;
+                    d.opts_csv.delimiter = b;
                 }
                 Task::none()
             }
@@ -265,7 +287,7 @@ impl App {
                 let Some(dialog) = t.export_dialog.as_ref() else {
                     return Task::none();
                 };
-                let fmt = dialog.options.format;
+                let fmt = dialog.format;
                 let ext = fmt.extension();
                 let default_name = format!("export.{ext}");
                 let parent = self.window_parent.clone();
@@ -297,13 +319,22 @@ impl App {
                 };
                 dialog.in_progress = true;
                 dialog.error = None;
-                let options = dialog.options;
+
+                let dialog = dialog.clone();
                 let engine = t.engine.clone();
                 let sql = t.content.text();
                 Task::perform(
                     async move {
                         let stream = engine.export_stream(sql).await?;
-                        Ok(crate::export::write_stream(stream, path, options).await?)
+                        Ok(match dialog.format {
+                            ExportFormat::Parquet => {
+                                dialog.opts_parquet.write_stream(stream, path).await?
+                            }
+                            ExportFormat::Csv => dialog.opts_csv.write_stream(stream, path).await?,
+                            ExportFormat::Json => {
+                                dialog.opts_json.write_stream(stream, path).await?
+                            }
+                        })
                     },
                     move |result| SqlMessage::ExportCompleted { id, result }.into(),
                 )
@@ -335,7 +366,7 @@ impl App {
                 id,
                 sql,
                 source_label,
-                elapsed_ms,
+                elapsed_ns,
                 result,
             } => {
                 let (status, row_count) = match &result {
@@ -352,7 +383,7 @@ impl App {
                 if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id) {
                     t.running = false;
                     t.query_handle = None;
-                    t.last_elapsed_ms = Some(elapsed_ms);
+                    t.last_elapsed_ns = Some(elapsed_ns);
                     t.explain = explain_kind;
                     match result {
                         Ok(r) => {
@@ -386,7 +417,7 @@ impl App {
                     source_label,
                     status,
                     row_count,
-                    elapsed_ms,
+                    elapsed_ns,
                     ran_at: SystemTime::now(),
                 });
                 // Refresh the queryable `history` table to include this run.
