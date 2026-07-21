@@ -2,6 +2,7 @@ use iced::widget::container::Style as ContainerStyle;
 use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{Background, Border, Element, Length, Theme};
+use parquet::basic::Compression;
 use parquet::file::statistics::Statistics;
 
 use crate::app::{FileMessage, Message};
@@ -85,7 +86,11 @@ fn column_chunk_table(file: &FileSummary, rg_idx: usize) -> Element<'_, Message>
 
         let r = row![
             body_cell(cc.column_path().string(), 240.0, zebra),
-            body_cell(format!("{:?}", cc.compression()), 120.0, zebra),
+            body_cell(
+                format_compression(cc.compression()).to_string(),
+                120.0,
+                zebra
+            ),
             body_cell(encodings.join(", "), 220.0, zebra),
             body_cell(format!("{}", cc.num_values()), 90.0, zebra),
             body_cell(
@@ -107,7 +112,18 @@ fn column_chunk_table(file: &FileSummary, rg_idx: usize) -> Element<'_, Message>
 
     container(col).padding([4, 40]).into()
 }
-
+fn format_compression(compression: Compression) -> &'static str {
+    match compression {
+        Compression::UNCOMPRESSED => "Uncompressed",
+        Compression::SNAPPY => "Snappy",
+        Compression::GZIP(_) => "GZIP",
+        Compression::LZO => "LZO",
+        Compression::BROTLI(_) => "BROTILI",
+        Compression::LZ4 => "LZ4",
+        Compression::ZSTD(_) => "ZSTD",
+        Compression::LZ4_RAW => "LZ4_RAW",
+    }
+}
 fn chunk_header() -> Element<'static, Message> {
     let r = row![
         header_cell("Column", 240.0),
