@@ -5,7 +5,6 @@ use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 
-use crate::hex::{HexCasing, bytes_to_hex};
 use crate::views::cell::CellString;
 
 pub fn default_options() -> FormatOptions<'static> {
@@ -571,12 +570,10 @@ pub fn bytes_view(data: &[u8]) -> CellString {
             CellString::new(text.to_owned(), s)
         }
         _ => {
-            let mut s = Vec::with_capacity(2 + data.len() * 2);
-            s.extend_from_slice(b"0x");
-            s.extend(bytes_to_hex(data.iter().cloned(), HexCasing::Upper));
-
-            // SAFETY: we only produce ASCII
-            unsafe { String::from_utf8_unchecked(s) }.into()
+            let mut s = String::with_capacity(2 + data.len() * 2);
+            s.push_str("0x");
+            s.push_str(&hex::encode_upper(data));
+            s.into()
         }
     }
 }

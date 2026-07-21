@@ -44,3 +44,4 @@ thiserror = "2"
 human-panic = "2.0"
 clap = { version = "4.1", features = ["derive", "env"] }
 dark-light = "2.0.0"
+hex = "0.4"
