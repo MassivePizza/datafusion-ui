@@ -1,123 +1,210 @@
 use iced::widget::container::Style as ContainerStyle;
 use iced::widget::text::Wrapping;
-use iced::widget::{Row, button, column, container, mouse_area, row, text};
-use iced::{Background, Border, Element, Length, Theme};
+use iced::widget::{Row, Space, button, column, container, mouse_area, row, text};
+use iced::{Background, Border, Element, Length, Padding, Theme};
 use parquet::basic::Compression;
-use parquet::file::metadata::ColumnChunkMetaData;
-use parquet::file::statistics::Statistics;
+use parquet::file::metadata::{ColumnChunkMetaData, RowGroupMetaData};
 
 use crate::app::{FileMessage, Message};
-use crate::format::{bytes_view, human_bytes};
+use crate::format::{count, human_bytes};
 use crate::parquet_io::FileSummary;
+use crate::stats_format::{self, Bound};
+use crate::theme as ui_theme;
 use crate::views::cell::CellString;
 use crate::views::overview::format_sorting_columns;
 
-pub fn view(file: &FileSummary, selected: Option<usize>) -> Element<'_, Message> {
-    let mut col = column![summary_header()].spacing(0);
+/// Width of each column in the expanded column-chunk table.
+const CHUNK_COL_WIDTHS: [f32; 9] = [240.0, 90.0, 90.0, 100.0, 100.0, 50.0, 100.0, 240.0, 240.0];
 
-    for (i, rg) in file.metadata.row_groups().iter().enumerate() {
-        let compressed: i64 = rg.columns().iter().map(|c| c.compressed_size()).sum();
-        let toggle_label = if selected == Some(i) { "▾" } else { "▸" };
+const SUMMARY_HEADERS: [&str; 9] = [
+    "Index",
+    "Rows",
+    "Share",
+    "Raw",
+    "Packed",
+    "Ratio",
+    "Cols",
+    "Packed/row",
+    "Sort order",
+];
+
+/// Width of each summary column. Sized so the summary rows and the expanded column-chunk table end
+/// at the same x — otherwise expanding a group leaves the narrower block above it looking ragged.
+const SUMMARY_COL_WIDTHS: [f32; 9] = [120.0, 120.0, 90.0, 120.0, 120.0, 80.0, 70.0, 110.0, 420.0];
+
+/// Left gutter holding the expand/collapse toggle. The expanded table is indented to match, so its
+/// contents line up under the summary row's first data column.
+const GUTTER: f32 = 40.0;
+
+const fn total_width(widths: &[f32]) -> f32 {
+    let mut total = 0.0;
+    let mut i = 0;
+    while i < widths.len() {
+        total += widths[i];
+        i += 1;
+    }
+    total
+}
+
+/// Width shared by the stats strip, the summary rows and the expanded table.
+const TABLE_WIDTH: f32 = GUTTER + total_width(&CHUNK_COL_WIDTHS);
+
+// Keep the two tables from drifting apart.
+const _: () = assert!(total_width(&SUMMARY_COL_WIDTHS) == total_width(&CHUNK_COL_WIDTHS));
+
+pub fn view(file: &FileSummary, selected: Option<usize>) -> Element<'_, Message> {
+    let groups = file.metadata.row_groups();
+    let total_rows: i64 = groups.iter().map(RowGroupMetaData::num_rows).sum();
+
+    let mut table = column![summary_header()].spacing(0);
+
+    for (i, rg) in groups.iter().enumerate() {
+        let expanded = selected == Some(i);
         let zebra = i % 2 == 1;
+        let packed: i64 = rg.columns().iter().map(|c| c.compressed_size()).sum();
+        let raw = rg.total_byte_size().max(0);
 
         let summary = row![
             container(
-                button(text(toggle_label.to_string()))
+                button(text(if expanded { "▾" } else { "▸" }.to_string()))
                     .on_press(FileMessage::RowGroupToggled(i).into())
                     .style(button::secondary),
             )
-            .width(Length::Fixed(40.0))
+            .width(Length::Fixed(GUTTER))
             .padding([2, 4]),
-            body_cell(format!("Group {i}"), 110.into()),
-            body_cell(format!("{}", rg.num_rows()), 110.into()),
-            body_cell(human_bytes(rg.total_byte_size().max(0) as u64), 140.into()),
-            body_cell(human_bytes(compressed.max(0) as u64), 140.into()),
-            body_cell(format!("{}", rg.num_columns()), 90.into()),
+            body_cell(format!("Group {i}"), width(0)),
+            body_cell(count(rg.num_rows()), width(1)),
+            body_cell(percent(rg.num_rows(), total_rows), width(2)),
+            body_cell(human_bytes(raw as u64), width(3)),
+            body_cell(human_bytes(packed.max(0) as u64), width(4)),
+            body_cell(ratio(raw, packed), width(5)),
+            body_cell(count(rg.num_columns() as i64), width(6)),
+            body_cell(per_row(packed, rg.num_rows()), width(7)),
+            sort_cell(file, rg, width(8)),
         ]
         .spacing(0)
         .align_y(iced::Alignment::Center);
 
-        let styled_summary =
-            container(summary).style(move |theme: &Theme| body_row_style(theme, zebra));
-        col = col.push(styled_summary);
+        table =
+            table.push(container(summary).style(move |theme: &Theme| body_row_style(theme, zebra)));
 
-        if selected == Some(i) {
-            col = col.push(column_chunk_table(file, i));
+        if expanded {
+            table = table.push(column_chunk_table(file, i));
         }
     }
 
+    column![stats_strip(file, groups, total_rows), table]
+        .spacing(14)
+        .into()
+}
+
+fn width(index: usize) -> Length {
+    Length::Fixed(SUMMARY_COL_WIDTHS[index])
+}
+
+/// A compact strip of file-wide row-group figures, above the table.
+fn stats_strip<'a>(
+    file: &'a FileSummary,
+    groups: &'a [RowGroupMetaData],
+    total_rows: i64,
+) -> Element<'a, Message> {
+    let body: Element<'a, Message> = if groups.is_empty() {
+        ui_theme::muted(ui_theme::ui("This file has no row groups.")).into()
+    } else {
+        let rows: Vec<i64> = groups.iter().map(RowGroupMetaData::num_rows).collect();
+        let packed: Vec<i64> = groups
+            .iter()
+            .map(|rg| rg.columns().iter().map(|c| c.compressed_size()).sum())
+            .collect();
+
+        row![
+            stat_tile("Row groups", count(groups.len() as i64), None),
+            stat_tile("Total rows", count(total_rows), None),
+            spread_tile("Rows / group", &rows, count),
+            spread_tile("Packed / group", &packed, |v| human_bytes(v.max(0) as u64)),
+            stat_tile(
+                "Columns",
+                count(groups[0].num_columns() as i64),
+                Some(format!(
+                    "{} leaf",
+                    file.metadata.file_metadata().schema_descr().num_columns()
+                )),
+            ),
+        ]
+        .spacing(32)
+        .into()
+    };
+
+    container(body)
+        .width(Length::Fixed(TABLE_WIDTH))
+        .padding([12, 16])
+        .style(ui_theme::surface_2)
+        .into()
+}
+
+fn stat_tile<'a>(label: &'a str, value: String, detail: Option<String>) -> Element<'a, Message> {
+    let mut col = column![
+        ui_theme::label_text(label),
+        ui_theme::mono(value).size(15).wrapping(Wrapping::None),
+    ]
+    .spacing(3);
+    if let Some(detail) = detail {
+        col = col.push(ui_theme::muted(ui_theme::mono_sm(detail)));
+    }
     col.into()
 }
 
-fn summary_header() -> Element<'static, Message> {
-    let r = row![
-        container(text(" ")).width(Length::Fixed(40.0)),
-        header_cell("Index", 110.into()),
-        header_cell("Rows", 110.into()),
-        header_cell("Raw", 140.into()),
-        header_cell("Packed", 140.into()),
-        header_cell("Columns", 90.into()),
-    ]
-    .spacing(0);
-    container(r).style(header_row_style).into()
+/// A tile showing the average across row groups, plus the min–max range when the groups differ —
+/// an uneven spread is usually what you came to this tab to find.
+fn spread_tile<'a>(
+    label: &'a str,
+    values: &[i64],
+    render: impl Fn(i64) -> String,
+) -> Element<'a, Message> {
+    let (Some(&min), Some(&max)) = (values.iter().min(), values.iter().max()) else {
+        return stat_tile(label, "—".into(), None);
+    };
+    let average = values.iter().sum::<i64>() / values.len() as i64;
+    let detail = (min != max).then(|| format!("{} – {}", render(min), render(max)));
+    stat_tile(label, render(average), detail)
 }
 
 fn column_chunk_table(file: &FileSummary, rg_idx: usize) -> Element<'_, Message> {
-    let rg = file.metadata.row_group(rg_idx);
-    let sort_order: Element<'_, Message> = match rg.sorting_columns() {
-        Some(cols) if !cols.is_empty() => Row::with_children(
-            format_sorting_columns(file, cols)
-                .into_iter()
-                .map(|text| iced::widget::Text::from(text).size(13).into()),
-        )
-        .into(),
-        Some(_) => "(empty)".into(),
-        None => "(not specified)".into(),
-    };
-    let sort_row = row![text("Sort order:").size(13), sort_order]
-        .spacing(8)
-        .padding([0, 0]);
-
+    let w = CHUNK_COL_WIDTHS;
     let mut columns = [
-        CcColumn::new("Column", 240.into(), |cc| cc.column_path().string()),
-        CcColumn::new("Values", 90.into(), |cc| format!("{}", cc.num_values())),
-        CcColumn::new("Nulls", 90.into(), |cc| {
+        CcColumn::new("Column", w[0].into(), |cc| cc.column_path().string()),
+        CcColumn::new("Values", w[1].into(), |cc| count(cc.num_values())),
+        CcColumn::new("Nulls", w[2].into(), |cc| {
             cc.statistics()
                 .and_then(|s| s.null_count_opt())
-                .map_or_else(|| "—".into(), |val| val.to_string())
+                .map_or_else(|| "—".into(), |val| count(val as i64))
         }),
-        CcColumn::new("Raw", 100.into(), |cc| {
+        CcColumn::new("Raw", w[3].into(), |cc| {
             human_bytes(cc.uncompressed_size().max(0) as u64)
         }),
-        CcColumn::new("Packed", 100.into(), |cc| {
+        CcColumn::new("Packed", w[4].into(), |cc| {
             human_bytes(cc.compressed_size().max(0) as u64)
         }),
-        CcColumn::new("Comp", 50.into(), |cc| {
+        CcColumn::new("Comp", w[5].into(), |cc| {
             format_compression(cc.compression()).to_string()
         }),
-        CcColumn::new("Coding", 100.into(), |cc| {
+        CcColumn::new("Coding", w[6].into(), |cc| {
             cc.encodings()
                 .map(|e| format!("{e:?}"))
                 .collect::<Vec<_>>()
                 .join(", ")
         }),
-        CcColumn::new("Min", 240.into(), |cc| {
-            let min_str = format_min(cc.statistics());
-            min_str.unwrap_or_else(|| "—".into())
-        }),
-        CcColumn::new("Max", 240.into(), |cc| {
-            let max_str = format_max(cc.statistics());
-            max_str.unwrap_or_else(|| "—".into())
-        }),
+        CcColumn::new("Min", w[7].into(), |cc| stat_bound(cc, Bound::Min)),
+        CcColumn::new("Max", w[8].into(), |cc| stat_bound(cc, Bound::Max)),
     ];
 
     let mut header_row = row![];
     for column in columns.iter_mut() {
         header_row = header_row.push(column.element.take());
     }
-    let mut table = column![sort_row, header_row].spacing(0);
+    let mut table = column![header_row].spacing(0);
 
-    for (idx, cc) in rg.columns().iter().enumerate() {
+    for (idx, cc) in file.metadata.row_group(rg_idx).columns().iter().enumerate() {
         let mut row = row![].spacing(0);
 
         for column in columns.iter() {
@@ -129,8 +216,81 @@ fn column_chunk_table(file: &FileSummary, rg_idx: usize) -> Element<'_, Message>
         table = table.push(styled);
     }
 
-    container(table).padding([4, 40]).into()
+    // An accent rule down the gutter ties the detail block to the row it belongs to.
+    let detail = row![
+        Space::new().width(Length::Fixed(GUTTER - 3.0)),
+        container(Space::new())
+            .width(Length::Fixed(3.0))
+            .height(Length::Fill)
+            .style(|_: &Theme| ContainerStyle {
+                background: Some(Background::Color(ui_theme::palette::accent_cool())),
+                ..ContainerStyle::default()
+            }),
+        table,
+    ];
+
+    container(detail)
+        .padding(Padding {
+            top: 6.0,
+            right: 0.0,
+            bottom: 10.0,
+            left: 0.0,
+        })
+        .into()
 }
+
+fn sort_cell<'a>(
+    file: &'a FileSummary,
+    rg: &'a RowGroupMetaData,
+    width: Length,
+) -> Element<'a, Message> {
+    let content: Element<'a, Message> = match rg.sorting_columns() {
+        Some(cols) if !cols.is_empty() => Row::with_children(
+            format_sorting_columns(file, cols)
+                .into_iter()
+                .map(|text| iced::widget::Text::from(text).size(13).into()),
+        )
+        .into(),
+        Some(_) => ui_theme::muted(text("(empty)").size(13)).into(),
+        None => ui_theme::muted(text("—").size(13)).into(),
+    };
+
+    container(content)
+        .width(width)
+        .padding([4, 10])
+        .clip(true)
+        .into()
+}
+
+fn percent(part: i64, whole: i64) -> String {
+    if whole <= 0 {
+        return "—".into();
+    }
+    format!("{:.1}%", part as f64 * 100.0 / whole as f64)
+}
+
+fn ratio(raw: i64, packed: i64) -> String {
+    if packed <= 0 {
+        return "—".into();
+    }
+    format!("{:.2}x", raw as f64 / packed as f64)
+}
+
+fn per_row(bytes: i64, rows: i64) -> String {
+    if rows <= 0 || bytes < 0 {
+        return "—".into();
+    }
+    human_bytes(bytes as u64 / rows as u64)
+}
+
+fn summary_header() -> Element<'static, Message> {
+    let mut r = row![container(text(" ")).width(Length::Fixed(GUTTER))].spacing(0);
+    for (label, width) in SUMMARY_HEADERS.iter().zip(SUMMARY_COL_WIDTHS) {
+        r = r.push(header_cell(label, Length::Fixed(width)));
+    }
+    container(r).style(header_row_style).into()
+}
+
 fn format_compression(compression: Compression) -> &'static str {
     match compression {
         Compression::UNCOMPRESSED => "Uncompressed",
@@ -208,32 +368,34 @@ fn body_row_style(theme: &Theme, zebra: bool) -> ContainerStyle {
     }
 }
 
-fn format_min(stats: Option<&Statistics>) -> Option<CellString> {
-    match stats? {
-        Statistics::Boolean(s) => opt_dbg(s.min_opt()),
-        Statistics::Int32(s) => opt_dbg(s.min_opt()),
-        Statistics::Int64(s) => opt_dbg(s.min_opt()),
-        Statistics::Int96(s) => opt_dbg(s.min_opt()),
-        Statistics::Float(s) => opt_dbg(s.min_opt()),
-        Statistics::Double(s) => opt_dbg(s.min_opt()),
-        Statistics::ByteArray(s) => s.min_opt().map(|b| bytes_view(b.data())),
-        Statistics::FixedLenByteArray(s) => s.min_opt().map(|b| bytes_view(b.data())),
-    }
+/// Render one statistics bound, decoded through the column's logical type.
+fn stat_bound(cc: &ColumnChunkMetaData, bound: Bound) -> CellString {
+    cc.statistics()
+        .and_then(|stats| stats_format::stat_value(stats, cc.column_descr(), bound))
+        .unwrap_or_else(|| "—".into())
 }
 
-fn format_max(stats: Option<&Statistics>) -> Option<CellString> {
-    match stats? {
-        Statistics::Boolean(s) => opt_dbg(s.max_opt()),
-        Statistics::Int32(s) => opt_dbg(s.max_opt()),
-        Statistics::Int64(s) => opt_dbg(s.max_opt()),
-        Statistics::Int96(s) => opt_dbg(s.max_opt()),
-        Statistics::Float(s) => opt_dbg(s.max_opt()),
-        Statistics::Double(s) => opt_dbg(s.max_opt()),
-        Statistics::ByteArray(s) => s.max_opt().map(|b| bytes_view(b.data())),
-        Statistics::FixedLenByteArray(s) => s.max_opt().map(|b| bytes_view(b.data())),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn opt_dbg<T: std::fmt::Debug>(v: Option<&T>) -> Option<CellString> {
-    v.map(|v| format!("{v:?}").into())
+    #[test]
+    fn the_two_tables_share_a_right_edge() {
+        // The layout only looks right if these match; the const assert above enforces it at compile
+        // time, this pins the intended total so a width tweak has to be deliberate.
+        assert_eq!(total_width(&CHUNK_COL_WIDTHS), 1250.0);
+        assert_eq!(total_width(&SUMMARY_COL_WIDTHS), 1250.0);
+        assert_eq!(TABLE_WIDTH, 1290.0);
+        assert_eq!(SUMMARY_HEADERS.len(), SUMMARY_COL_WIDTHS.len());
+    }
+
+    #[test]
+    fn derived_columns_handle_empty_and_degenerate_groups() {
+        assert_eq!(percent(3, 10), "30.0%");
+        assert_eq!(percent(0, 0), "—");
+        assert_eq!(ratio(1000, 250), "4.00x");
+        assert_eq!(ratio(1000, 0), "—");
+        assert_eq!(per_row(2048, 2), "1.00 KiB");
+        assert_eq!(per_row(2048, 0), "—");
+    }
 }

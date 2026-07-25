@@ -9,6 +9,7 @@ mod flightsql;
 mod format;
 mod parquet_io;
 mod sqlide_highlight;
+mod stats_format;
 mod store;
 mod theme;
 mod views;

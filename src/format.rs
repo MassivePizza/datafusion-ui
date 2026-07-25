@@ -538,6 +538,22 @@ fn write_type_full(out: &mut String, dt: &DataType, indent: usize) {
     }
 }
 
+/// Group a count into thousands: `1048576` becomes `1,048,576`.
+pub fn count(value: i64) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if value < 0 {
+        out.push('-');
+    }
+    for (i, digit) in digits.char_indices() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 pub fn human_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -569,11 +585,14 @@ pub fn bytes_view(data: &[u8]) -> CellString {
             s.push('"');
             CellString::new(text.to_owned(), s)
         }
-        _ => {
-            let mut s = String::with_capacity(2 + data.len() * 2);
-            s.push_str("0x");
-            s.push_str(&hex::encode_upper(data));
-            s.into()
-        }
+        _ => bytes_hex(data).into(),
     }
+}
+
+/// Render `data` as an uppercase `0x`-prefixed hex string.
+pub fn bytes_hex(data: &[u8]) -> String {
+    let mut s = String::with_capacity(2 + data.len() * 2);
+    s.push_str("0x");
+    s.push_str(&hex::encode_upper(data));
+    s
 }

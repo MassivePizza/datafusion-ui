@@ -299,8 +299,7 @@ pub fn label_text(s: &str) -> text::Text<'static> {
         })
 }
 
-pub fn muted<'a, T: text::IntoFragment<'a>>(t: text::Text<'a>) -> text::Text<'a> {
-    let _ = std::marker::PhantomData::<T>;
+pub fn muted<'a>(t: text::Text<'a>) -> text::Text<'a> {
     t.style(|_: &Theme| text::Style {
         color: Some(palette::fg_muted()),
     })

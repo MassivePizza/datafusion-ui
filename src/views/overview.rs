@@ -6,7 +6,7 @@ use iced::{Background, Border, Color, Element, Length, Theme, color};
 use parquet::file::metadata::SortingColumn;
 
 use crate::app::{FileMessage, Message};
-use crate::format::{human_bytes, type_label, type_label_full};
+use crate::format::{count, human_bytes, type_label, type_label_full};
 use crate::parquet_io::FileSummary;
 use crate::theme as ui_theme;
 
@@ -31,9 +31,9 @@ pub fn view<'a>(
         kv("Path", file.path.display().to_string()),
         kv("Size on disk", human_bytes(file.file_size_bytes)),
         section("Contents"),
-        kv("Total rows", format!("{}", file.total_rows)),
-        kv("Row groups", format!("{}", file.metadata.num_row_groups())),
-        kv("Columns", format!("{}", file.schema.fields().len())),
+        kv("Total rows", count(file.total_rows)),
+        kv("Row groups", count(file.metadata.num_row_groups() as i64)),
+        kv("Columns", count(file.schema.fields().len() as i64)),
         section("Writer"),
         kv("Parquet version", format!("{}", meta.version())),
         kv(
