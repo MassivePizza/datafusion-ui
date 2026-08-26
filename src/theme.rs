@@ -530,6 +530,29 @@ pub fn pill_colors_nested() -> PillColors {
     }
 }
 
+/// The floating panel used to show a table cell's full value when the cell clips it.
+///
+/// Generic over the message type so views can hand it to `tooltip` without this module knowing
+/// about `Message`.
+pub fn tooltip_panel<'a, M: 'a>(content: String) -> iced::Element<'a, M> {
+    container(mono_sm(content).style(|_: &Theme| text::Style {
+        color: Some(palette::fg_primary()),
+    }))
+    .padding([6, 10])
+    .max_width(640.0)
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(palette::bg_surface_2())),
+        text_color: Some(palette::fg_primary()),
+        border: Border {
+            color: palette::border_strong(),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
 pub fn pill_style(colors: PillColors) -> impl Fn(&Theme) -> container::Style + Copy {
     move |_: &Theme| container::Style {
         background: Some(Background::Color(colors.bg)),

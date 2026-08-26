@@ -461,7 +461,12 @@ fn arrow_type_cell<'a>(
 
     let needs_tooltip = compact != full && !full.is_empty() && full != "—";
     let with_tip: Element<'a, Message> = if needs_tooltip {
-        tooltip(inner, type_tooltip(full.clone()), tooltip::Position::Bottom).into()
+        tooltip(
+            inner,
+            ui_theme::tooltip_panel(full.clone()),
+            tooltip::Position::Bottom,
+        )
+        .into()
     } else {
         inner.into()
     };
@@ -469,25 +474,6 @@ fn arrow_type_cell<'a>(
     mouse_area(with_tip)
         .on_press(FileMessage::CopyCell(compact).into())
         .into()
-}
-
-fn type_tooltip<'a>(content: String) -> Element<'a, Message> {
-    container(ui_theme::mono_sm(content).style(|_: &Theme| text::Style {
-        color: Some(ui_theme::palette::fg_primary()),
-    }))
-    .padding([6, 10])
-    .max_width(640.0)
-    .style(|_: &Theme| ContainerStyle {
-        background: Some(Background::Color(ui_theme::palette::bg_surface_2())),
-        text_color: Some(ui_theme::palette::fg_primary()),
-        border: Border {
-            color: ui_theme::palette::border_strong(),
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..ContainerStyle::default()
-    })
-    .into()
 }
 
 fn schema_child_row_style(_theme: &Theme) -> ContainerStyle {

@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use iced::widget::container::Style as ContainerStyle;
 use iced::widget::text::Wrapping;
-use iced::widget::{Row, Space, button, column, container, mouse_area, row, text};
+use iced::widget::{Row, Space, button, column, container, mouse_area, row, text, tooltip};
 use iced::{Background, Border, Element, Length, Padding, Theme};
-use parquet::basic::Compression;
+use parquet::basic::{Compression, Encoding};
 use parquet::file::metadata::{ColumnChunkMetaData, RowGroupMetaData};
 
 use crate::app::{FileMessage, Message};
@@ -14,7 +16,11 @@ use crate::views::cell::CellString;
 use crate::views::overview::format_sorting_columns;
 
 /// Width of each column in the expanded column-chunk table.
-const CHUNK_COL_WIDTHS: [f32; 9] = [240.0, 90.0, 90.0, 100.0, 100.0, 50.0, 100.0, 240.0, 240.0];
+///
+/// "Comp" and "Coding" hold the widest fixed vocabulary here — `Uncompressed` and the encoding
+/// names, which run to `DELTA_LENGTH_BYTE_ARRAY` — so they get the room, paid for by trimming the
+/// columns whose values are short and predictable (counts and byte sizes).
+const CHUNK_COL_WIDTHS: [f32; 9] = [200.0, 85.0, 85.0, 90.0, 90.0, 115.0, 195.0, 195.0, 195.0];
 
 const SUMMARY_HEADERS: [&str; 9] = [
     "Index",
@@ -98,8 +104,8 @@ pub fn view(file: &FileSummary, selected: Option<usize>) -> Element<'_, Message>
         .into()
 }
 
-fn width(index: usize) -> Length {
-    Length::Fixed(SUMMARY_COL_WIDTHS[index])
+fn width(index: usize) -> f32 {
+    SUMMARY_COL_WIDTHS[index]
 }
 
 /// A compact strip of file-wide row-group figures, above the table.
@@ -172,30 +178,25 @@ fn spread_tile<'a>(
 fn column_chunk_table(file: &FileSummary, rg_idx: usize) -> Element<'_, Message> {
     let w = CHUNK_COL_WIDTHS;
     let mut columns = [
-        CcColumn::new("Column", w[0].into(), |cc| cc.column_path().string()),
-        CcColumn::new("Values", w[1].into(), |cc| count(cc.num_values())),
-        CcColumn::new("Nulls", w[2].into(), |cc| {
+        CcColumn::new("Column", w[0], |cc| cc.column_path().string()),
+        CcColumn::new("Values", w[1], |cc| count(cc.num_values())),
+        CcColumn::new("Nulls", w[2], |cc| {
             cc.statistics()
                 .and_then(|s| s.null_count_opt())
                 .map_or_else(|| "—".into(), |val| count(val as i64))
         }),
-        CcColumn::new("Raw", w[3].into(), |cc| {
+        CcColumn::new("Raw", w[3], |cc| {
             human_bytes(cc.uncompressed_size().max(0) as u64)
         }),
-        CcColumn::new("Packed", w[4].into(), |cc| {
+        CcColumn::new("Packed", w[4], |cc| {
             human_bytes(cc.compressed_size().max(0) as u64)
         }),
-        CcColumn::new("Comp", w[5].into(), |cc| {
+        CcColumn::new("Comp", w[5], |cc| {
             format_compression(cc.compression()).to_string()
         }),
-        CcColumn::new("Coding", w[6].into(), |cc| {
-            cc.encodings()
-                .map(|e| format!("{e:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        }),
-        CcColumn::new("Min", w[7].into(), |cc| stat_bound(cc, Bound::Min)),
-        CcColumn::new("Max", w[8].into(), |cc| stat_bound(cc, Bound::Max)),
+        CcColumn::new("Coding", w[6], |cc| format_encodings(cc.encodings())),
+        CcColumn::new("Min", w[7], |cc| stat_bound(cc, Bound::Min)),
+        CcColumn::new("Max", w[8], |cc| stat_bound(cc, Bound::Max)),
     ];
 
     let mut header_row = row![];
@@ -242,21 +243,24 @@ fn column_chunk_table(file: &FileSummary, rg_idx: usize) -> Element<'_, Message>
 fn sort_cell<'a>(
     file: &'a FileSummary,
     rg: &'a RowGroupMetaData,
-    width: Length,
+    width: f32,
 ) -> Element<'a, Message> {
     let content: Element<'a, Message> = match rg.sorting_columns() {
-        Some(cols) if !cols.is_empty() => Row::with_children(
-            format_sorting_columns(file, cols)
-                .into_iter()
-                .map(|text| iced::widget::Text::from(text).size(13).into()),
-        )
-        .into(),
+        Some(cols) if !cols.is_empty() => {
+            Row::with_children(format_sorting_columns(file, cols).into_iter().map(|text| {
+                iced::widget::Text::from(text)
+                    .size(13)
+                    .wrapping(Wrapping::None)
+                    .into()
+            }))
+            .into()
+        }
         Some(_) => ui_theme::muted(text("(empty)").size(13)).into(),
         None => ui_theme::muted(text("—").size(13)).into(),
     };
 
     container(content)
-        .width(width)
+        .width(Length::Fixed(width))
         .padding([4, 10])
         .clip(true)
         .into()
@@ -303,19 +307,53 @@ fn format_compression(compression: Compression) -> &'static str {
         Compression::LZ4_RAW => "LZ4_Raw",
     }
 }
+
+/// Sort key that floats the encoding you actually came to look at to the front.
+///
+/// A chunk's encoding set mixes the data-page encoding with the definition/repetition *level*
+/// encodings, which are near-always `RLE` and carry no signal. Leading with the value encoding
+/// means that when the cell is too narrow for the full list, what gets clipped is the part nobody
+/// reads.
+#[allow(deprecated)] // BIT_PACKED is deprecated upstream but still shows up in older files.
+fn encoding_rank(encoding: Encoding) -> u8 {
+    match encoding {
+        Encoding::RLE_DICTIONARY | Encoding::PLAIN_DICTIONARY => 0,
+        Encoding::DELTA_BINARY_PACKED
+        | Encoding::DELTA_LENGTH_BYTE_ARRAY
+        | Encoding::DELTA_BYTE_ARRAY
+        | Encoding::BYTE_STREAM_SPLIT => 1,
+        // In a dictionary-encoded column PLAIN is just the dictionary page's own encoding.
+        Encoding::PLAIN => 2,
+        Encoding::RLE | Encoding::BIT_PACKED => 3,
+    }
+}
+
+/// Render a chunk's encodings, most informative first.
+///
+/// `ColumnChunkMetaData::encodings` walks a bit mask, so the input is already de-duplicated and in
+/// discriminant order — which is not a useful order to read in, hence the sort.
+fn format_encodings(encodings: impl IntoIterator<Item = Encoding>) -> String {
+    let mut list: Vec<Encoding> = encodings.into_iter().collect();
+    // Stable, so discriminant order still breaks ties within a rank.
+    list.sort_by_key(|e| encoding_rank(*e));
+    list.iter()
+        .map(|e| format!("{e:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 pub struct CcColumn<'a, 'b> {
     element: Option<Element<'a, Message>>,
-    width: Length,
+    width: f32,
     view: Box<dyn Fn(&'a ColumnChunkMetaData) -> CellString + 'b>,
 }
 impl<'a, 'b> CcColumn<'a, 'b> {
     pub fn new<S: Into<CellString>>(
         header: &str,
-        width: Length,
+        width: f32,
         view: impl Fn(&'a ColumnChunkMetaData) -> S + 'b,
     ) -> Self {
         Self {
-            element: Some(header_cell(header, width)),
+            element: Some(header_cell(header, Length::Fixed(width))),
             width,
             view: Box::new(move |cc| view(cc).into()),
         }
@@ -331,15 +369,39 @@ fn header_cell<'a>(label: &str, length: Length) -> Element<'a, Message> {
         .into()
 }
 
-fn body_cell<'a>(value: impl Into<CellString>, width: Length) -> Element<'a, Message> {
+fn body_cell<'a>(value: impl Into<CellString>, width: f32) -> Element<'a, Message> {
     let value = value.into();
+    // Never wrap: a cell with no fixed height that wraps stretches its whole row, so one long
+    // encoding list used to make every other cell in the row float in three lines of whitespace.
+    // Word wrapping couldn't save the long values anyway — it can't break `DELTA_BINARY_PACKED`.
     let label = text(value.short_or_real().clone())
         .size(13)
-        .wrapping(Wrapping::Word);
-    let inner = container(label).width(width).padding([4, 10]).clip(true);
+        .wrapping(Wrapping::None);
+    let inner = container(label)
+        .width(Length::Fixed(width))
+        .padding([4, 10])
+        .clip(true);
 
-    mouse_area(inner)
+    // Only build the tooltip when it's needed: it's constructed even while hidden, and a wide row
+    // group would otherwise allocate one per cell per frame. 20.0 = the horizontal padding above.
+    let content: Element<'a, Message> = if value.overflows(width - 20.0) {
+        tooltip(
+            inner,
+            ui_theme::tooltip_panel(value.short_or_real().clone()),
+            tooltip::Position::Bottom,
+        )
+        // Every cell is a tooltip target; with no delay, dragging across the table strobes.
+        .delay(Duration::from_millis(350))
+        .gap(4)
+        .into()
+    } else {
+        inner.into()
+    };
+
+    // Outermost, so the click lands whether or not the tooltip is in the way.
+    mouse_area(content)
         .on_press(FileMessage::CopyCell(value.real).into())
+        .interaction(iced::mouse::Interaction::Pointer)
         .into()
 }
 
@@ -387,6 +449,56 @@ mod tests {
         assert_eq!(total_width(&SUMMARY_COL_WIDTHS), 1250.0);
         assert_eq!(TABLE_WIDTH, 1290.0);
         assert_eq!(SUMMARY_HEADERS.len(), SUMMARY_COL_WIDTHS.len());
+    }
+
+    #[test]
+    fn the_value_encoding_leads_the_coding_cell() {
+        // Discriminant order would put PLAIN first; the reader wants to see the dictionary.
+        assert_eq!(
+            format_encodings([Encoding::PLAIN, Encoding::RLE, Encoding::RLE_DICTIONARY]),
+            "RLE_DICTIONARY, PLAIN, RLE"
+        );
+        assert_eq!(
+            format_encodings([Encoding::RLE, Encoding::DELTA_BINARY_PACKED]),
+            "DELTA_BINARY_PACKED, RLE"
+        );
+        assert_eq!(format_encodings([]), "");
+    }
+
+    #[test]
+    fn every_encoding_is_ranked() {
+        // Fails loudly if a parquet bump adds a variant that encoding_rank hasn't placed.
+        #[allow(deprecated)]
+        let variants = Encoding::VARIANTS;
+        assert_eq!(variants.len(), 9);
+        for &e in variants {
+            assert!(encoding_rank(e) <= 3, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn the_comp_column_fits_every_compression_label() {
+        // This column held "Uncompressed" in 30px of room until the widths were rebalanced.
+        for c in [
+            Compression::UNCOMPRESSED,
+            Compression::SNAPPY,
+            Compression::GZIP(Default::default()),
+            Compression::LZO,
+            Compression::BROTLI(Default::default()),
+            Compression::LZ4,
+            Compression::ZSTD(Default::default()),
+            Compression::LZ4_RAW,
+        ] {
+            let cell: CellString = format_compression(c).into();
+            assert!(!cell.overflows(CHUNK_COL_WIDTHS[5] - 20.0), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn the_coding_column_fits_a_dictionary_encoded_chunk() {
+        // The common case — anything longer clips its tail and falls back to the tooltip.
+        let cell: CellString = format_encodings([Encoding::RLE_DICTIONARY, Encoding::PLAIN]).into();
+        assert!(!cell.overflows(CHUNK_COL_WIDTHS[6] - 20.0));
     }
 
     #[test]
