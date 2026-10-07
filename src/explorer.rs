@@ -391,6 +391,7 @@ impl Explorer {
                 name: "datafusion".into(),
                 schemas: vec![SchemaNs { name: None, tables }],
             }],
+            functions: Vec::new(),
         }
     }
 
@@ -429,7 +430,10 @@ impl Explorer {
                     .collect(),
             })
             .collect();
-        Catalog { databases }
+        Catalog {
+            databases,
+            functions: Vec::new(),
+        }
     }
 }
 

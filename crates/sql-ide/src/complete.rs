@@ -8,6 +8,7 @@
 
 use crate::catalog::Catalog;
 use crate::lex::{SpannedToken, TokenKind, lex};
+use crate::statements::line_col_to_byte as cursor_byte_offset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionKind {
@@ -104,126 +105,134 @@ const FUNCTIONS: &[&str] = &[
 ];
 
 /// Compute completions for the cursor at (1-based) `line`, `column` in `sql`.
+///
+/// Candidates are ranked: prefix matches before substring matches, and within
+/// a tier in the order they were gathered (columns in scope, then functions,
+/// then keywords). Keywords follow the typed case: an all-lowercase prefix
+/// inserts a lowercase keyword.
 pub fn complete(sql: &str, line: u64, column: u64, catalog: &Catalog) -> Vec<Completion> {
     let cursor = cursor_byte_offset(sql, line, column);
     let before = &sql[..cursor];
 
     let (prefix, after_dot, qualifier) = parse_prefix(before);
-    let replace_len = prefix.chars().count();
-    let prefix_lc = prefix.to_ascii_lowercase();
+    let mut gather = Gather::new(&prefix);
 
     // Member access `qualifier.<prefix>` → that table's columns only.
     if after_dot {
-        let mut out = Vec::new();
         if let Some(table) = resolve_qualifier(&qualifier, sql, catalog) {
             for col in &table.columns {
-                push_if_matches(
-                    &mut out,
+                gather.push(
                     &col.name,
                     CompletionKind::Column,
                     Some(col.data_type.clone()),
-                    &prefix_lc,
-                    replace_len,
                 );
             }
         }
-        return out;
+        return gather.finish();
     }
 
-    let ctx = clause_context(before);
-    let mut out = Vec::new();
+    let functions: Vec<&str> = if catalog.functions.is_empty() {
+        FUNCTIONS.to_vec()
+    } else {
+        catalog.functions.iter().map(String::as_str).collect()
+    };
 
-    match ctx {
+    match clause_context(before) {
         Clause::Table => {
             for table in catalog.tables() {
-                push_if_matches(
-                    &mut out,
+                gather.push(
                     &table.name,
                     CompletionKind::Table,
                     Some(table.qualified.clone()),
-                    &prefix_lc,
-                    replace_len,
                 );
                 if !table.qualified.eq_ignore_ascii_case(&table.name) {
-                    push_if_matches(
-                        &mut out,
+                    gather.push(
                         &table.qualified,
                         CompletionKind::Table,
                         Some("table".into()),
-                        &prefix_lc,
-                        replace_len,
                     );
                 }
             }
         }
         Clause::Expr => {
-            // Columns from tables in FROM scope, then functions, then keywords.
             for table in tables_in_scope(sql, catalog) {
                 for col in &table.columns {
-                    push_if_matches(
-                        &mut out,
+                    gather.push(
                         &col.name,
                         CompletionKind::Column,
                         Some(format!("{} · {}", table.name, col.data_type)),
-                        &prefix_lc,
-                        replace_len,
                     );
                 }
             }
-            for f in FUNCTIONS {
-                push_if_matches(
-                    &mut out,
-                    f,
-                    CompletionKind::Function,
-                    Some("function".into()),
-                    &prefix_lc,
-                    replace_len,
-                );
+            for f in &functions {
+                gather.push(f, CompletionKind::Function, Some("function".into()));
             }
             for kw in KEYWORDS {
-                push_if_matches(
-                    &mut out,
-                    kw,
-                    CompletionKind::Keyword,
-                    None,
-                    &prefix_lc,
-                    replace_len,
-                );
+                gather.push(kw, CompletionKind::Keyword, None);
             }
         }
         Clause::Start => {
             for kw in KEYWORDS {
-                push_if_matches(
-                    &mut out,
-                    kw,
-                    CompletionKind::Keyword,
-                    None,
-                    &prefix_lc,
-                    replace_len,
-                );
+                gather.push(kw, CompletionKind::Keyword, None);
             }
         }
     }
 
-    out
+    gather.finish()
 }
 
-fn push_if_matches(
-    out: &mut Vec<Completion>,
-    candidate: &str,
-    kind: CompletionKind,
-    detail: Option<String>,
-    prefix_lc: &str,
+/// Accumulates candidates with their match tier, then orders them.
+struct Gather {
+    prefix_lc: String,
     replace_len: usize,
-) {
-    if prefix_lc.is_empty() || candidate.to_ascii_lowercase().starts_with(prefix_lc) {
-        out.push(Completion {
-            label: candidate.to_string(),
-            kind,
-            insert_text: candidate.to_string(),
-            detail,
-            replace_len,
-        });
+    lowercase_keywords: bool,
+    /// `(tier, insertion order, completion)`; tier 0 = prefix, 1 = substring.
+    items: Vec<(u8, usize, Completion)>,
+}
+
+impl Gather {
+    fn new(prefix: &str) -> Self {
+        Gather {
+            prefix_lc: prefix.to_ascii_lowercase(),
+            replace_len: prefix.chars().count(),
+            lowercase_keywords: !prefix.is_empty()
+                && prefix
+                    .chars()
+                    .all(|c| !c.is_alphabetic() || c.is_lowercase()),
+            items: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, candidate: &str, kind: CompletionKind, detail: Option<String>) {
+        let lc = candidate.to_ascii_lowercase();
+        let tier = if self.prefix_lc.is_empty() || lc.starts_with(&self.prefix_lc) {
+            0
+        } else if lc.contains(&self.prefix_lc) {
+            1
+        } else {
+            return;
+        };
+        let insert_text = if kind == CompletionKind::Keyword && self.lowercase_keywords {
+            lc
+        } else {
+            candidate.to_string()
+        };
+        self.items.push((
+            tier,
+            self.items.len(),
+            Completion {
+                label: candidate.to_string(),
+                kind,
+                insert_text,
+                detail,
+                replace_len: self.replace_len,
+            },
+        ));
+    }
+
+    fn finish(mut self) -> Vec<Completion> {
+        self.items.sort_by_key(|(tier, order, _)| (*tier, *order));
+        self.items.into_iter().map(|(_, _, c)| c).collect()
     }
 }
 
@@ -329,6 +338,11 @@ fn tables_in_scope<'a>(sql: &str, catalog: &'a Catalog) -> Vec<&'a crate::catalo
     out
 }
 
+/// The first table referenced by a FROM/JOIN clause, for naming editor tabs.
+pub fn first_table_name(sql: &str) -> Option<String> {
+    from_references(sql).into_iter().next().map(|(t, _)| t)
+}
+
 /// Parse `(table_name, optional_alias)` pairs from FROM/JOIN clauses by scanning
 /// the token stream. Handles `FROM t`, `FROM t a`, and `FROM t AS a`.
 fn from_references(sql: &str) -> Vec<(String, Option<String>)> {
@@ -386,23 +400,6 @@ fn from_references(sql: &str) -> Vec<(String, Option<String>)> {
     out
 }
 
-/// Byte offset into `sql` of the (1-based) `line`/`column` cursor position.
-fn cursor_byte_offset(sql: &str, line: u64, column: u64) -> usize {
-    let mut off = 0usize;
-    for (idx, l) in sql.split_inclusive('\n').enumerate() {
-        if (idx as u64) + 1 == line {
-            for (chars, (b, _)) in l.char_indices().enumerate() {
-                if chars as u64 == column.saturating_sub(1) {
-                    return off + b;
-                }
-            }
-            return off + l.trim_end_matches('\n').len();
-        }
-        off += l.len();
-    }
-    sql.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +427,7 @@ mod tests {
                     }],
                 }],
             }],
+            functions: Vec::new(),
         }
     }
 
@@ -450,11 +448,9 @@ mod tests {
         let cat = sample_catalog();
         let sql = "SELECT * FROM or";
         let comps = complete(sql, 1, (sql.len() + 1) as u64, &cat);
-        assert!(
-            comps
-                .iter()
-                .all(|c| c.label.to_lowercase().starts_with("or"))
-        );
+        // Prefix matches lead; substring matches (e.g. `cat.sch.orders`) follow.
+        assert!(comps[0].label.to_lowercase().starts_with("or"));
+        assert!(comps.iter().all(|c| c.label.to_lowercase().contains("or")));
         assert_eq!(comps[0].replace_len, 2);
     }
 
@@ -468,6 +464,36 @@ mod tests {
         let l = labels(&comps);
         assert!(l.contains(&"id".to_string()));
         assert!(l.contains(&"amount".to_string()));
+    }
+
+    #[test]
+    fn substring_matches_rank_after_prefix_matches() {
+        let cat = sample_catalog();
+        let sql = "SELECT * FROM der";
+        let comps = complete(sql, 1, (sql.len() + 1) as u64, &cat);
+        // "orders" only contains "der"; it is still offered (tier 1).
+        assert!(labels(&comps).contains(&"orders".to_string()));
+    }
+
+    #[test]
+    fn lowercase_prefix_inserts_lowercase_keyword() {
+        let cat = sample_catalog();
+        let sql = "sel";
+        let comps = complete(sql, 1, 4, &cat);
+        let select = comps.iter().find(|c| c.label == "SELECT").unwrap();
+        assert_eq!(select.insert_text, "select");
+        let comps = complete("SEL", 1, 4, &cat);
+        let select = comps.iter().find(|c| c.label == "SELECT").unwrap();
+        assert_eq!(select.insert_text, "SELECT");
+    }
+
+    #[test]
+    fn catalog_functions_replace_builtin_list() {
+        let mut cat = sample_catalog();
+        cat.functions = vec!["date_bin".into()];
+        let sql = "SELECT date_b";
+        let comps = complete(sql, 1, (sql.len() + 1) as u64, &cat);
+        assert_eq!(labels(&comps), vec!["date_bin".to_string()]);
     }
 
     #[test]

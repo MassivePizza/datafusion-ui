@@ -188,6 +188,14 @@ pub(crate) fn should_complete(text: &str, line: usize, column: usize) -> bool {
         .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
 }
 
+/// Byte column of a 0-based char column on line `line` of `text`.
+pub(crate) fn char_col_to_byte(text: &str, line: usize, char_col: usize) -> usize {
+    text.split('\n')
+        .nth(line)
+        .map(|l| l.char_indices().nth(char_col).map_or(l.len(), |(b, _)| b))
+        .unwrap_or(0)
+}
+
 pub(crate) fn flight_pill_style(_theme: &iced::Theme) -> iced::widget::container::Style {
     iced::widget::container::Style {
         background: Some(iced::Background::Color(palette::accent_cool_soft())),

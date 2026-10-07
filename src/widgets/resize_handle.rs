@@ -43,6 +43,9 @@ enum Axis {
 
 pub struct ResizeHandle<'a, Message> {
     axis: Axis,
+    /// Draw the divider line even when idle (vertical handles hide it by
+    /// default because the grid already draws row dividers).
+    idle_visible: bool,
     /// The current committed size along `axis` (drag origin).
     current_size: f32,
     min: f32,
@@ -62,6 +65,7 @@ pub fn resize_handle<'a, Message: 'a>(
 ) -> ResizeHandle<'a, Message> {
     ResizeHandle {
         axis: Axis::Horizontal,
+        idle_visible: true,
         current_size: current_width,
         min: MIN_COL_WIDTH,
         max: MAX_COL_WIDTH,
@@ -81,12 +85,29 @@ pub fn resize_handle_vertical<'a, Message: 'a>(
 ) -> ResizeHandle<'a, Message> {
     ResizeHandle {
         axis: Axis::Vertical,
+        idle_visible: false,
         current_size: current_height,
         min: MIN_ROW_HEIGHT,
         max: MAX_ROW_HEIGHT,
         on_resize: Box::new(on_resize),
         on_release,
         on_double_click: on_reset,
+    }
+}
+
+impl<Message> ResizeHandle<'_, Message> {
+    /// Override the drag limits (the constructors default to grid column/row
+    /// bounds).
+    pub fn range(mut self, min: f32, max: f32) -> Self {
+        self.min = min;
+        self.max = max;
+        self
+    }
+
+    /// Always draw the divider line, not just on hover/drag.
+    pub fn idle_visible(mut self) -> Self {
+        self.idle_visible = true;
+        self
     }
 }
 
@@ -255,15 +276,17 @@ where
             }
             Axis::Vertical => {
                 // The grid already draws a 1px divider after each row, so the
-                // idle handle stays invisible; only hover/drag shows a line.
-                if !active {
+                // idle handle stays invisible there; only hover/drag shows a
+                // line unless `idle_visible` asks for one.
+                if !active && !self.idle_visible {
                     return;
                 }
+                let h = if active { 2.0 } else { 1.0 };
                 Rectangle {
                     x: bounds.x,
-                    y: bounds.y + (bounds.height - 2.0) / 2.0,
+                    y: bounds.y + (bounds.height - h) / 2.0,
                     width: bounds.width,
-                    height: 2.0,
+                    height: h,
                 }
             }
         };

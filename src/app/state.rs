@@ -11,6 +11,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use chrono::TimeDelta;
 use iced::widget::text_editor;
+use iced::widget::text_editor::{Action, Motion};
 
 use crate::config::Config;
 use crate::engine::QueryEngine;
@@ -174,6 +175,9 @@ pub struct App {
     pub grid_row_height: f32,
     /// Recently opened data files, newest first.
     pub recent_files: Vec<RecentFile>,
+    /// Names of every scalar/aggregate/window function the local DataFusion
+    /// session knows, captured at boot for completion.
+    pub function_names: Vec<String>,
 
     pub app_dir: PathBuf,
 
@@ -203,7 +207,7 @@ pub struct ConnInfoState {
 /// A tabbed SQL workspace: each editor tab is bound to its own `QueryEngine`
 /// (the open Parquet file's session, or a FlightSQL connection). History is
 /// shared across all tabs and kept in memory only.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SqlWorkspace {
     pub editors: Vec<SqlEditorTab>,
     pub active: usize,
@@ -212,7 +216,29 @@ pub struct SqlWorkspace {
     pub history_collapsed: bool,
     /// Whether the "+ New query" source picker is open.
     pub source_picker_open: bool,
+    /// Height of the editor text area, shared by every tab and persisted as a
+    /// UI preference. Dragged via the divider under the editor.
+    pub editor_height: f32,
 }
+
+impl Default for SqlWorkspace {
+    fn default() -> Self {
+        SqlWorkspace {
+            editors: Vec::new(),
+            active: 0,
+            next_id: 0,
+            history: Vec::new(),
+            history_collapsed: false,
+            source_picker_open: false,
+            editor_height: DEFAULT_EDITOR_HEIGHT,
+        }
+    }
+}
+
+/// Default / drag bounds for the SQL editor text area height.
+pub(crate) const DEFAULT_EDITOR_HEIGHT: f32 = 180.0;
+pub(crate) const MIN_EDITOR_HEIGHT: f32 = 80.0;
+pub(crate) const MAX_EDITOR_HEIGHT: f32 = 1200.0;
 
 /// Rows shown per page in a SQL editor's results grid (client-side paging over
 /// the already-fetched, capped result batch).
@@ -274,6 +300,23 @@ pub struct SqlEditorTab {
     /// The kind of the last edit, used to break undo groups on insert↔delete
     /// transitions.
     pub last_edit_kind: Option<EditKind>,
+    /// Last reported viewport of the editor's scroll area, used to keep the
+    /// caret visible and to place the completion popup.
+    pub editor_viewport: Option<EditorViewport>,
+    /// The `(` / `)` pair adjacent to the caret, as 0-based `(line, byte col)`
+    /// positions, for bracket-match highlighting.
+    pub bracket_pair: Option<[(usize, usize); 2]>,
+    /// Whether the completion popup may open on the next intellisense refresh.
+    /// Armed by typing (or Ctrl+Space), disarmed by caret moves and clicks, so
+    /// clicking to the end of a word does not pop the list.
+    pub completion_armed: bool,
+}
+
+/// Scroll position and visible height of an editor's scroll area.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EditorViewport {
+    pub offset_y: f32,
+    pub height: f32,
 }
 
 /// A point-in-time snapshot of an editor's text and caret, used for undo/redo.
@@ -338,13 +381,78 @@ impl SqlEditorTab {
         self.last_edit_kind = None;
     }
 
-    /// Reset all undo/redo history (e.g. when the document is replaced wholesale
-    /// by loading a history entry).
-    pub fn reset_undo(&mut self) {
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.undo_group_open = false;
-        self.last_edit_kind = None;
+    /// Replace the whole document as one undo step, leaving the caret at
+    /// `(line, byte column)` and refreshing diagnostics. Every wholesale text
+    /// rewrite (history load, format, toggle comment, …) goes through here.
+    pub fn set_text(&mut self, text: &str, line: usize, column: usize) {
+        self.push_undo();
+        self.break_undo_group();
+        self.replace_text(text, line, column);
+    }
+
+    /// Swap the document without touching the undo stacks (undo/redo use this
+    /// after they have moved their own snapshots around).
+    pub fn replace_text(&mut self, text: &str, line: usize, column: usize) {
+        self.content = text_editor::Content::with_text(text);
+        restore_cursor(&mut self.content, line, column);
+        self.completion = None;
+        self.completion_armed = false;
+        self.diagnostics = sql_ide::diagnostics(text);
+    }
+
+    /// Byte offset of the caret within `content.text()`.
+    pub fn caret_byte_offset(&self) -> usize {
+        let pos = self.content.cursor().position;
+        let mut off = 0usize;
+        for (i, line) in self.content.lines().enumerate() {
+            if i == pos.line {
+                return off + pos.column.min(line.text.len());
+            }
+            off += line.text.len() + line.ending.as_str().len();
+        }
+        off
+    }
+
+    /// Text of the caret's line.
+    pub fn caret_line_text(&self) -> String {
+        let pos = self.content.cursor().position;
+        self.content
+            .line(pos.line)
+            .map(|l| l.text.into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Caret column in chars (iced reports a byte index).
+    pub fn caret_char_column(&self) -> usize {
+        let pos = self.content.cursor().position;
+        let line = self.caret_line_text();
+        line[..pos.column.min(line.len())].chars().count()
+    }
+
+    /// Inclusive range of lines covered by the selection (or the caret line).
+    pub fn selected_line_range(&self) -> (usize, usize) {
+        let cursor = self.content.cursor();
+        let a = cursor.position.line;
+        let b = cursor.selection.map_or(a, |s| s.line);
+        (a.min(b), a.max(b))
+    }
+}
+
+/// Move the caret to `(line, byte column)` from a known origin. iced's `Content`
+/// exposes no line/column setter (`move_to` is pixel-based), so we navigate by
+/// motions; `Right` steps one char, so the byte column is converted first.
+pub(crate) fn restore_cursor(content: &mut text_editor::Content, line: usize, column: usize) {
+    content.perform(Action::Move(Motion::DocumentStart));
+    for _ in 0..line {
+        content.perform(Action::Move(Motion::Down));
+    }
+    content.perform(Action::Move(Motion::Home));
+    let chars = content
+        .line(line)
+        .map(|l| l.text[..column.min(l.text.len())].chars().count())
+        .unwrap_or(0);
+    for _ in 0..chars {
+        content.perform(Action::Move(Motion::Right));
     }
 }
 

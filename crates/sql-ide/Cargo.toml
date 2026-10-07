@@ -10,3 +10,4 @@ description = "GUI-agnostic SQL IDE support: lexing, schema-aware completion, an
 [dependencies]
 # Reuses the exact sqlparser that DataFusion 54.0 resolves, so no duplicate compile.
 sqlparser = { workspace = true }
+sqlformat = "0.5"

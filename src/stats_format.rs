@@ -135,20 +135,17 @@ impl StatKind {
 
     fn from_logical(logical: &LogicalType, descr: &ColumnDescriptor) -> Self {
         match logical {
-            LogicalType::Decimal { precision, scale } => StatKind::Decimal {
-                precision: *precision,
-                scale: *scale,
+            LogicalType::Decimal(decimal) => StatKind::Decimal {
+                precision: decimal.precision,
+                scale: decimal.scale,
             },
             LogicalType::Date => StatKind::Date,
-            LogicalType::Time { unit, .. } => StatKind::Time(unit.into()),
-            LogicalType::Timestamp {
-                unit,
-                is_adjusted_to_u_t_c,
-            } => StatKind::Timestamp {
-                unit: unit.into(),
-                utc: *is_adjusted_to_u_t_c,
+            LogicalType::Time(time) => StatKind::Time((&time.unit).into()),
+            LogicalType::Timestamp(timestamps) => StatKind::Timestamp {
+                unit: (&timestamps.unit).into(),
+                utc: timestamps.is_adjusted_to_u_t_c,
             },
-            LogicalType::Integer { is_signed, .. } if !is_signed => StatKind::Unsigned,
+            LogicalType::Integer(int) if !int.is_signed => StatKind::Unsigned,
             LogicalType::Float16 => StatKind::Float16,
             LogicalType::Uuid => StatKind::Uuid,
             LogicalType::String | LogicalType::Enum | LogicalType::Json => StatKind::Text,
@@ -443,7 +440,7 @@ fn mark_inexact(cell: CellString, inexact: bool) -> CellString {
 mod tests {
     use std::sync::Arc;
 
-    use parquet::basic::Type as PhysicalType;
+    use parquet::basic::{DecimalType, Type as PhysicalType};
     use parquet::data_type::{ByteArray, FixedLenByteArray};
     use parquet::schema::types::{ColumnPath, Type as SchemaType};
 
@@ -503,10 +500,10 @@ mod tests {
         // FIXED_LEN_BYTE_ARRAY(8), DECIMAL(18, 2) — the encoding the user hit.
         let descr = descriptor(
             PhysicalType::FIXED_LEN_BYTE_ARRAY,
-            Some(LogicalType::Decimal {
+            Some(LogicalType::Decimal(DecimalType {
                 precision: 18,
                 scale: 2,
-            }),
+            })),
             ConvertedType::NONE,
             8,
             18,
@@ -523,10 +520,10 @@ mod tests {
     fn decimal_column_from_int32_physical_type() {
         let descr = descriptor(
             PhysicalType::INT32,
-            Some(LogicalType::Decimal {
+            Some(LogicalType::Decimal(DecimalType {
                 precision: 9,
                 scale: 2,
-            }),
+            })),
             ConvertedType::NONE,
             0,
             9,
@@ -579,10 +576,10 @@ mod tests {
     fn timestamp_column_end_to_end() {
         let descr = logical(
             PhysicalType::INT64,
-            LogicalType::Timestamp {
+            LogicalType::Timestamp(parquet::basic::TimestampType {
                 is_adjusted_to_u_t_c: true,
                 unit: TimeUnit::MICROS,
-            },
+            }),
         );
         let stats = Statistics::int64(Some(0), Some(1_784_988_191_250_000), None, None, false);
         assert_eq!(
@@ -595,10 +592,10 @@ mod tests {
 
         let descr = logical(
             PhysicalType::INT64,
-            LogicalType::Timestamp {
+            LogicalType::Timestamp(parquet::basic::TimestampType {
                 is_adjusted_to_u_t_c: false,
                 unit: TimeUnit::MICROS,
-            },
+            }),
         );
         assert_eq!(
             bounds(&stats, &descr).1,

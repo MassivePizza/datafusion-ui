@@ -79,8 +79,35 @@ pub enum SqlMessage {
     /// Redo the last undone edit group (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y).
     Redo(u64),
     Run(u64),
+    /// Ctrl+Enter: run the selection if any, else the statement under the
+    /// caret, else the whole buffer.
+    RunSmart(u64),
     /// Abort the in-flight query for this editor (the Cancel button).
     Cancel(u64),
+    /// Reformat the selection (or whole buffer) with the SQL formatter.
+    Format(u64),
+    /// Comment / uncomment the selected lines with `-- `.
+    ToggleComment(u64),
+    /// Duplicate the caret line below itself.
+    DuplicateLine(u64),
+    /// Enter: break the line and copy the current line's indentation.
+    NewlineAutoIndent(u64),
+    /// Ctrl+Space: open the completion popup even without a typed prefix.
+    CompletionRequest(u64),
+    /// Move the caret to the first syntax diagnostic.
+    GotoDiagnostic(u64),
+    /// Live height update while dragging the editor divider.
+    EditorResize(f32),
+    /// Editor divider drag finished — persist the height.
+    EditorResizeEnd,
+    /// Double-click on the editor divider — restore the default height.
+    EditorResizeReset,
+    /// The editor's scroll area moved or was resized.
+    EditorScrolled {
+        id: u64,
+        offset_y: f32,
+        height: f32,
+    },
     /// Run the editor's query wrapped in `EXPLAIN` (leaving the editor text as
     /// the user wrote it).
     Explain(u64),

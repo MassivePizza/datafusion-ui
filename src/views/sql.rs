@@ -6,8 +6,8 @@ use iced::alignment::Vertical;
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::widget::container::Style as ContainerStyle;
-use iced::widget::text::Wrapping;
-use iced::widget::text_editor::{Binding, KeyPress};
+use iced::widget::text::{LineHeight, Wrapping};
+use iced::widget::text_editor::{Action, Binding, Edit, KeyPress, Status as EditorStatus};
 use iced::widget::{
     Space, button, checkbox, column, container, mouse_area, opaque, pick_list, pin, row,
     scrollable, stack, text, text_editor, text_input, toggler,
@@ -17,19 +17,38 @@ use sql_ide::CompletionKind;
 
 use crate::app::{
     App, AuthKind, CompletionState, ConnectForm, ExportDialogState, FlightMessage, HistoryStatus,
-    Message, RESULT_PAGE_SIZE, SourceRef, SqlEditorTab, SqlMessage,
+    MAX_EDITOR_HEIGHT, MIN_EDITOR_HEIGHT, Message, RESULT_PAGE_SIZE, SourceRef, SqlEditorTab,
+    SqlMessage,
 };
 use crate::export::{ExportFormat, ParquetColumnOptions, ParquetCompression};
-use crate::sqlide_highlight::SqlHighlighter;
+use crate::sqlide_highlight::{HighlightSettings, SqlHighlighter};
 use crate::theme::palette;
 use crate::theme::{self, FONT_UI_MEDIUM};
+use crate::widgets::resize_handle_vertical;
+
+/// Inner padding of the editor text area, also applied to the gutter so line
+/// numbers align with their lines.
+pub(crate) const EDITOR_PAD: f32 = 10.0;
+const EDITOR_FONT_SIZE: f32 = 13.0;
+/// Exact row height of one editor line (shared by the gutter and the popup
+/// placement maths).
+pub(crate) const LINE_H: f32 = EDITOR_FONT_SIZE * 1.3;
+/// Advance width of JetBrains Mono at `EDITOR_FONT_SIZE`.
+const CHAR_W: f32 = 7.8;
+/// Tallest the completion popup gets before it scrolls internally.
+const COMPLETION_MAX_H: f32 = 200.0;
+
+/// Widget id of an editor tab's scroll area (target of scroll-to-caret).
+pub(crate) fn editor_scroll_id(id: u64) -> iced::widget::Id {
+    iced::widget::Id::from(format!("sql-editor-scroll-{id}"))
+}
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let strip = editor_tab_strip(app);
 
     let active = app.sql.editors.get(app.sql.active);
     let body: Element<'_, Message> = match active {
-        Some(tab) => editor_pane(tab),
+        Some(tab) => editor_pane(tab, app.sql.editor_height),
         None => empty_state(),
     };
 
@@ -157,50 +176,122 @@ fn picker_button<'a>(label: String, src: SourceRef) -> Element<'a, Message> {
 
 // -- Active editor pane -------------------------------------------------------
 
-fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
+fn editor_pane(tab: &SqlEditorTab, editor_height: f32) -> Element<'_, Message> {
     let id = tab.id;
     let popup_open = tab.completion.as_ref().is_some_and(|c| !c.items.is_empty());
+    let caret = tab.content.cursor().position;
+    let line_count = tab.content.line_count().max(1);
+    let diag_line = tab
+        .diagnostics
+        .first()
+        .and_then(|d| d.line)
+        .map(|l| l.saturating_sub(1) as usize);
+    let error_at = tab.diagnostics.first().and_then(|d| {
+        let line = d.line?.saturating_sub(1) as usize;
+        let col_chars = d.column?.saturating_sub(1) as usize;
+        let byte = tab.content.line(line).map(|l| {
+            l.text
+                .char_indices()
+                .nth(col_chars)
+                .map_or(l.text.len(), |(b, _)| b)
+        })?;
+        Some((line, byte))
+    });
+    let settings = HighlightSettings {
+        bracket_pair: tab.bracket_pair,
+        error_at,
+    };
 
+    // The editor grows with its content (`Shrink`) and the surrounding
+    // scrollable provides the viewport, so a line-number gutter laid out
+    // beside it scrolls in lockstep.
     let editor = text_editor(&tab.content)
         .on_action(move |a| SqlMessage::EditorAction(id, a).into())
-        .key_binding(move |kp| completion_key_binding(id, popup_open, kp))
-        .highlight_with::<SqlHighlighter>((), crate::sqlide_highlight::to_format)
+        .key_binding(move |kp| editor_key_binding(id, popup_open, kp))
+        .highlight_with::<SqlHighlighter>(settings, crate::sqlide_highlight::to_format)
         .font(theme::FONT_MONO)
-        .size(13)
+        .size(EDITOR_FONT_SIZE)
+        .line_height(LineHeight::Absolute(LINE_H.into()))
         // No wrapping keeps (line, column) a faithful grid for popup placement.
         .wrapping(Wrapping::None)
-        .height(Length::Fixed(180.0))
-        .padding(10)
+        .height(Length::Shrink)
+        // Fill the viewport even for short documents so a click anywhere in
+        // the box (not just on a line) focuses the editor. Padding is added
+        // on top of this minimum, so subtract it to avoid a phantom scrollbar.
+        .min_height(editor_height - 2.0 * EDITOR_PAD)
+        .padding(EDITOR_PAD)
         .style(editor_style);
+
+    let gutter_w = gutter_width(line_count);
+    let scroll = scrollable(row![
+        gutter(line_count, caret.line, diag_line, gutter_w),
+        editor
+    ])
+    .id(editor_scroll_id(id))
+    .width(Length::Fill)
+    .height(Length::Fixed(editor_height))
+    .on_scroll(move |vp| {
+        SqlMessage::EditorScrolled {
+            id,
+            offset_y: vp.absolute_offset().y,
+            height: vp.bounds().height,
+        }
+        .into()
+    });
 
     // Float the completion popup over the editor near the cursor. iced exposes
     // no pixel caret, so approximate from the (line, column) text position and
     // monospace metrics (CHAR_W is calibrated for JetBrains Mono at size 13).
     //
-    // The editor is ALWAYS the first child of a `stack`, whether or not the
-    // popup is shown. Changing the surrounding widget type (e.g. container vs
-    // stack) would shift the editor's position in the tree and make iced rebuild
-    // its state — dropping keyboard focus, which silently blocks typing.
-    let editor_framed = container(editor)
+    // The scroll area is ALWAYS the first child of a `stack`, whether or not
+    // the popup is shown. Changing the surrounding widget type would shift the
+    // editor's position in the tree and make iced rebuild its state — dropping
+    // keyboard focus, which silently blocks typing.
+    let editor_framed = container(scroll)
         .width(Length::Fill)
         .style(editor_frame_style);
     let mut layers = stack![editor_framed];
     if let Some(c) = &tab.completion
         && !c.items.is_empty()
     {
-        const PAD: f32 = 10.0;
-        const LINE_H: f32 = 13.0 * 1.3;
-        const CHAR_W: f32 = 7.8;
-        let pos = tab.content.cursor().position;
-        let x = PAD + pos.column as f32 * CHAR_W;
-        let y = PAD + (pos.line as f32 + 1.0) * LINE_H;
-        // `opaque` must wrap the popup box itself, NOT the `pin`: `pin` defaults
-        // to Length::Fill, so `opaque(pin(..))` would mark the whole editor area
-        // as click-capturing and swallow every click before it reaches the
-        // editor. Wrapping the list keeps capture scoped to the popup's bounds.
-        layers = layers.push(pin(opaque(completion_list(id, c))).x(x).y(y));
+        let scroll_y = tab.editor_viewport.map_or(0.0, |v| v.offset_y);
+        let x = gutter_w + EDITOR_PAD + tab.caret_char_column() as f32 * CHAR_W;
+        let line_top = EDITOR_PAD + caret.line as f32 * LINE_H - scroll_y;
+        let below = line_top + LINE_H;
+        // Rough popup height (rows are ~21px, capped like the list itself).
+        // Prefer below the caret line, then above; when neither fits, take
+        // the roomier side and cap the list so it never clips at the frame.
+        let est_h = (c.items.len().min(9) as f32 * 21.0 + 8.0).min(COMPLETION_MAX_H);
+        let room_below = editor_height - below;
+        let (y, max_h) = if est_h <= room_below {
+            (below, COMPLETION_MAX_H)
+        } else if est_h <= line_top {
+            (line_top - est_h, COMPLETION_MAX_H)
+        } else if room_below >= line_top {
+            (below, room_below)
+        } else {
+            let h = est_h.min(line_top);
+            (line_top - h, h)
+        };
+        // Only show the popup while its anchor line is inside the viewport.
+        if line_top >= 0.0 && below <= editor_height && max_h >= LINE_H {
+            // `opaque` must wrap the popup box itself, NOT the `pin`: `pin`
+            // defaults to Length::Fill, so `opaque(pin(..))` would mark the
+            // whole editor area as click-capturing and swallow every click
+            // before it reaches the editor.
+            layers = layers.push(pin(opaque(completion_list(id, c, max_h))).x(x).y(y));
+        }
     }
     let editor_layer: Element<'_, Message> = layers.into();
+
+    let divider = resize_handle_vertical(
+        editor_height,
+        |h| SqlMessage::EditorResize(h).into(),
+        SqlMessage::EditorResizeEnd.into(),
+        SqlMessage::EditorResizeReset.into(),
+    )
+    .range(MIN_EDITOR_HEIGHT, MAX_EDITOR_HEIGHT)
+    .idle_visible();
 
     let mut explain_btn = button(theme::ui_medium("Explain").size(12))
         .style(theme::ghost_button)
@@ -351,29 +442,156 @@ fn editor_pane(tab: &SqlEditorTab) -> Element<'_, Message> {
         }
     };
 
-    // First syntax diagnostic (if any), shown only when no run-error is up.
-    let diagnostic: Element<'_, Message> = match (tab.error.is_some(), tab.diagnostics.first()) {
-        (false, Some(d)) => container(
-            text(format!("⚠ {}", elide_oneline(&d.message, 80)))
-                .size(11)
-                .color(theme::palette::accent_warm())
-                .wrapping(Wrapping::Word),
-        )
-        .padding([2, 4])
-        .width(Length::Fill)
-        .into(),
-        _ => Space::new().width(Length::Fixed(0.0)).into(),
-    };
-
-    let base: Element<'_, Message> = column![editor_layer, toolbar, diagnostic, error, results]
-        .spacing(8)
-        .height(Length::Fill)
-        .into();
+    let base: Element<'_, Message> = column![
+        editor_layer,
+        divider,
+        status_bar(tab),
+        toolbar,
+        error,
+        results
+    ]
+    .spacing(6)
+    .height(Length::Fill)
+    .into();
 
     match tab.export_dialog.as_ref() {
         Some(dialog) => stack![base, export_overlay(id, dialog)].into(),
         None => base,
     }
+}
+
+/// Width of the line-number gutter for `line_count` lines.
+fn gutter_width(line_count: usize) -> f32 {
+    let digits = line_count.max(1).to_string().len().max(2) as f32;
+    digits * CHAR_W + 18.0
+}
+
+/// Line numbers beside the editor: one row per line at exactly `LINE_H`, the
+/// caret line emphasised, the first syntax error marked.
+fn gutter<'a>(
+    line_count: usize,
+    caret_line: usize,
+    diag_line: Option<usize>,
+    width: f32,
+) -> Element<'a, Message> {
+    let mut col = column![].spacing(0);
+    for i in 0..line_count {
+        let is_caret = i == caret_line;
+        let is_err = diag_line == Some(i);
+        let color = if is_err {
+            palette::accent_rose()
+        } else if is_caret {
+            palette::fg_primary()
+        } else {
+            palette::fg_dim()
+        };
+        let label = text(format!("{}", i + 1))
+            .font(if is_caret {
+                theme::FONT_MONO_MEDIUM
+            } else {
+                theme::FONT_MONO
+            })
+            .size(EDITOR_FONT_SIZE)
+            .line_height(LineHeight::Absolute(LINE_H.into()))
+            .color(color)
+            .wrapping(Wrapping::None)
+            .align_x(iced::alignment::Horizontal::Right)
+            .width(Length::Fill);
+        col = col.push(
+            container(label)
+                .height(Length::Fixed(LINE_H))
+                .width(Length::Fill)
+                .padding([0, 8]),
+        );
+    }
+    container(col)
+        .width(Length::Fixed(width))
+        .padding([EDITOR_PAD, 0.0])
+        .style(gutter_style)
+        .into()
+}
+
+/// Caret position, selection size, the Ctrl+Enter target, and the first
+/// syntax diagnostic (clickable: jumps the caret to it).
+fn status_bar(tab: &SqlEditorTab) -> Element<'_, Message> {
+    let id = tab.id;
+    let caret = tab.content.cursor().position;
+    let mut items = row![].spacing(14).align_y(iced::Alignment::Center);
+
+    items = items.push(
+        theme::mono_sm(format!(
+            "Ln {}, Col {}",
+            caret.line + 1,
+            tab.caret_char_column() + 1
+        ))
+        .style(muted)
+        .wrapping(Wrapping::None),
+    );
+
+    let selection = tab.content.selection().filter(|s| !s.is_empty());
+    if let Some(sel) = &selection {
+        items = items.push(
+            theme::mono_sm(format!("{} selected", count(sel.chars().count() as i64)))
+                .style(muted)
+                .wrapping(Wrapping::None),
+        );
+    }
+
+    let hint = if selection.is_some() {
+        "Ctrl+Enter runs selection".to_string()
+    } else {
+        let text = tab.content.text();
+        match sql_ide::statement_index(&text, tab.caret_byte_offset()) {
+            Some((i, n)) => format!("Ctrl+Enter runs statement {} of {n}", i + 1),
+            None => "Ctrl+Enter runs query".to_string(),
+        }
+    };
+    items = items.push(theme::mono_sm(hint).style(muted).wrapping(Wrapping::None));
+
+    items = items.push(Space::new().width(Length::Fill));
+
+    if let Some(d) = tab.diagnostics.first() {
+        let location = match (d.line, d.column) {
+            (Some(l), Some(c)) => format!(" (Ln {l}, Col {c})"),
+            _ => String::new(),
+        };
+        let message = elide_oneline(strip_location(&d.message), 90);
+        items = items.push(
+            button(
+                text(format!("⚠ {message}{location}"))
+                    .size(11)
+                    .color(palette::accent_warm())
+                    .wrapping(Wrapping::None),
+            )
+            .style(theme::ghost_button)
+            .padding([1, 6])
+            .on_press(SqlMessage::GotoDiagnostic(id).into()),
+        );
+    }
+
+    // Format lives here rather than in the action toolbar, which is already
+    // full at narrow widths.
+    let mut format_btn = button(theme::ui_medium("Format").size(11))
+        .style(theme::ghost_button)
+        .padding([1, 8]);
+    if !tab.content.is_empty() {
+        format_btn = format_btn.on_press(SqlMessage::Format(id).into());
+    }
+    items = items.push(format_btn);
+
+    container(items)
+        .width(Length::Fill)
+        .padding([0, 4])
+        .clip(true)
+        .into()
+}
+
+/// Drop sqlparser's trailing ` at Line: N, Column: M` (we show it ourselves).
+fn strip_location(message: &str) -> &str {
+    message
+        .rfind(" at Line:")
+        .map_or(message, |i| &message[..i])
+        .trim_end()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -722,23 +940,34 @@ fn explain_toggle<'a>(
         .into()
 }
 
-/// Key bindings active while the completion popup is open: arrows move the
-/// selection, Tab/Enter accept, Esc dismisses. Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z
-/// (or Ctrl/Cmd+Y) drive our own undo/redo, since iced's `text_editor` has none.
-/// All other keys (and every key when the popup is closed) fall through to the
-/// editor's default behavior.
-fn completion_key_binding(id: u64, open: bool, kp: KeyPress) -> Option<Binding<Message>> {
-    // Undo/redo work regardless of whether the completion popup is open.
-    if kp.modifiers.command()
-        && let Key::Character(c) = &kp.key
-    {
-        match c.as_str() {
-            "z" if kp.modifiers.shift() => {
-                return Some(Binding::Custom(SqlMessage::Redo(id).into()));
-            }
-            "z" => return Some(Binding::Custom(SqlMessage::Undo(id).into())),
-            "y" => return Some(Binding::Custom(SqlMessage::Redo(id).into())),
-            _ => {}
+/// Editor key bindings. Command chords come first (undo/redo, run, format,
+/// comment, duplicate, completion request); while the completion popup is
+/// open, arrows move the selection, Tab/Enter accept and Esc dismisses;
+/// otherwise Tab/Shift+Tab indent and Enter auto-indents. Everything else
+/// falls through to iced's defaults.
+fn editor_key_binding(id: u64, open: bool, kp: KeyPress) -> Option<Binding<Message>> {
+    if !matches!(kp.status, EditorStatus::Focused { .. }) {
+        return None;
+    }
+    let shift = kp.modifiers.shift();
+    if kp.modifiers.command() {
+        let msg: Option<SqlMessage> = match &kp.key {
+            Key::Character(c) => match c.as_str() {
+                "z" if shift => Some(SqlMessage::Redo(id)),
+                "z" => Some(SqlMessage::Undo(id)),
+                "y" => Some(SqlMessage::Redo(id)),
+                "f" if shift => Some(SqlMessage::Format(id)),
+                "/" => Some(SqlMessage::ToggleComment(id)),
+                "d" => Some(SqlMessage::DuplicateLine(id)),
+                _ => None,
+            },
+            Key::Named(Named::Enter) if shift => Some(SqlMessage::Run(id)),
+            Key::Named(Named::Enter) => Some(SqlMessage::RunSmart(id)),
+            Key::Named(Named::Space) => Some(SqlMessage::CompletionRequest(id)),
+            _ => None,
+        };
+        if let Some(m) = msg {
+            return Some(Binding::Custom(m.into()));
         }
     }
     if open {
@@ -760,27 +989,43 @@ fn completion_key_binding(id: u64, open: bool, kp: KeyPress) -> Option<Binding<M
             _ => {}
         }
     }
+    match &kp.key {
+        Key::Named(Named::Tab) => {
+            let edit = if shift { Edit::Unindent } else { Edit::Indent };
+            return Some(Binding::Custom(
+                SqlMessage::EditorAction(id, Action::Edit(edit)).into(),
+            ));
+        }
+        Key::Named(Named::Enter) if !shift && !kp.modifiers.alt() => {
+            return Some(Binding::Custom(SqlMessage::NewlineAutoIndent(id).into()));
+        }
+        _ => {}
+    }
     Binding::from_key_press(kp)
 }
 
 /// The floating completion list. Capped to a sane number of visible rows.
-fn completion_list<'a>(id: u64, c: &'a CompletionState) -> Element<'a, Message> {
+fn completion_list<'a>(id: u64, c: &'a CompletionState, max_h: f32) -> Element<'a, Message> {
     const MAX_VISIBLE: usize = 50;
     let mut col = column![].spacing(0);
     for (i, item) in c.items.iter().take(MAX_VISIBLE).enumerate() {
         let selected = i == c.selected;
-        let label = theme::mono_sm(elide(&item.label, 26))
+        let label = theme::mono_sm(elide(&item.label, 28))
             .color(if selected {
                 theme::palette::fg_primary()
             } else {
                 theme::palette::fg_muted()
             })
             .wrapping(Wrapping::None);
+        let detail = theme::mono_sm(elide(item.detail.as_deref().unwrap_or(""), 22))
+            .size(10)
+            .style(muted)
+            .wrapping(Wrapping::None);
         let tag = theme::mono_sm(kind_tag(item.kind))
             .size(9)
             .style(muted)
             .wrapping(Wrapping::None);
-        let content = row![label, Space::new().width(Length::Fill), tag]
+        let content = row![label, Space::new().width(Length::Fill), detail, tag]
             .spacing(8)
             .align_y(iced::Alignment::Center);
         let btn = button(content)
@@ -795,8 +1040,8 @@ fn completion_list<'a>(id: u64, c: &'a CompletionState) -> Element<'a, Message> 
         col = col.push(btn);
     }
     container(scrollable(col))
-        .width(Length::Fixed(260.0))
-        .max_height(200.0)
+        .width(Length::Fixed(340.0))
+        .max_height(max_h)
         .style(theme::surface_2)
         .into()
 }
@@ -1112,13 +1357,15 @@ fn count(n: i64) -> String {
 
 // -- styles -------------------------------------------------------------------
 
+/// The text area itself is borderless; the frame around the scroll area
+/// (gutter + text) draws the border so it does not scroll with the content.
 fn editor_style(_theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
     text_editor::Style {
-        background: Background::Color(palette::bg_deep()),
+        background: Background::Color(Color::TRANSPARENT),
         border: Border {
-            color: palette::border_subtle(),
-            width: 1.0,
-            radius: 3.0.into(),
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 0.0.into(),
         },
         placeholder: palette::fg_dim(),
         value: palette::fg_primary(),
@@ -1127,7 +1374,22 @@ fn editor_style(_theme: &Theme, _status: text_editor::Status) -> text_editor::St
 }
 
 fn editor_frame_style(_theme: &Theme) -> ContainerStyle {
-    ContainerStyle::default()
+    ContainerStyle {
+        background: Some(Background::Color(palette::bg_deep())),
+        border: Border {
+            color: palette::border_subtle(),
+            width: 1.0,
+            radius: 3.0.into(),
+        },
+        ..ContainerStyle::default()
+    }
+}
+
+fn gutter_style(_theme: &Theme) -> ContainerStyle {
+    ContainerStyle {
+        background: Some(Background::Color(palette::bg_surface())),
+        ..ContainerStyle::default()
+    }
 }
 
 fn source_pill_style(_theme: &Theme) -> ContainerStyle {

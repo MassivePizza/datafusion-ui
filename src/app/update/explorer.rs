@@ -36,7 +36,7 @@ impl App {
                 }
                 if let Some(t) = self.sql.editors.get_mut(self.sql.active) {
                     let sql = format!("SELECT * FROM {qualified} LIMIT 100");
-                    t.content = text_editor::Content::with_text(&sql);
+                    t.set_text(&sql, 0, 0);
                 }
                 self.selection = Selection::Sql;
                 Task::none()
