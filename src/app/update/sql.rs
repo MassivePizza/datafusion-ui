@@ -366,7 +366,7 @@ impl App {
                 id,
                 sql,
                 source_label,
-                elapsed_ns,
+                elapsed,
                 result,
             } => {
                 let (status, row_count) = match &result {
@@ -383,7 +383,7 @@ impl App {
                 if let Some(t) = self.sql.editors.iter_mut().find(|t| t.id == id) {
                     t.running = false;
                     t.query_handle = None;
-                    t.last_elapsed_ns = Some(elapsed_ns);
+                    t.last_elapsed = Some(elapsed);
                     t.explain = explain_kind;
                     match result {
                         Ok(r) => {
@@ -417,7 +417,7 @@ impl App {
                     source_label,
                     status,
                     row_count,
-                    elapsed_ns,
+                    elapsed,
                     ran_at: SystemTime::now(),
                 });
                 // Refresh the queryable `history` table to include this run.

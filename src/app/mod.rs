@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use arrow::record_batch::RecordBatch;
+use chrono::TimeDelta;
 use iced::Task;
 use iced::widget::text_editor;
 use iced::widget::text_editor::{Action, Edit};
@@ -339,7 +340,7 @@ impl App {
             schema: None,
             error: None,
             last_row_count: None,
-            last_elapsed_ns: None,
+            last_elapsed: None,
             truncated: false,
             completion: None,
             diagnostics: Vec::new(),
@@ -387,15 +388,15 @@ impl App {
         let (task, handle) = Task::perform(
             async move {
                 let result = engine.run_query(sql.clone(), cap).await;
-                let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap();
-                (sql, source_label, nanos, result)
+                let elapsed = TimeDelta::from_std(started.elapsed()).unwrap();
+                (sql, source_label, elapsed, result)
             },
-            move |(sql, source_label, elapsed_ns, result)| {
+            move |(sql, source_label, elapsed, result)| {
                 SqlMessage::Completed {
                     id,
                     sql,
                     source_label,
-                    elapsed_ns,
+                    elapsed,
                     result,
                 }
                 .into()
