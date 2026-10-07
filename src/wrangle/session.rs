@@ -87,6 +87,22 @@ impl SharedSession {
     }
 
     /// Drop a registered table (best-effort; logs on failure).
+    /// Every scalar, aggregate and window function name registered in the
+    /// session, sorted and de-duplicated, for editor completion.
+    pub fn function_names(&self) -> Vec<String> {
+        let state = self.ctx.state();
+        let mut names: Vec<String> = state
+            .scalar_functions()
+            .keys()
+            .chain(state.aggregate_functions().keys())
+            .chain(state.window_functions().keys())
+            .cloned()
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
     pub fn deregister(&self, name: &str) {
         if let Err(e) = self.ctx.deregister_table(name) {
             tracing::warn!(error = %e, name, "deregister table failed");

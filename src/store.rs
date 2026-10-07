@@ -3,7 +3,7 @@
 //!
 //! Four small whole-file snapshots are rewritten on change — query history,
 //! per-schema column widths, recently opened files, and UI preferences
-//! (grid row height). Parquet (rather than a
+//! (grid row height, SQL editor height). Parquet (rather than a
 //! bespoke format) is deliberate: the files are also queryable by the app's own
 //! DataFusion engine, and we already depend on the `parquet`/`arrow` writers.
 //!
@@ -33,7 +33,9 @@ const RECENT_FILE: &str = "recent_files.parquet";
 const UI_PREFS_FILE: &str = "ui_prefs.parquet";
 
 /// Key of the grid row-height preference in `ui_prefs.parquet`.
-const ROW_HEIGHT_KEY: &str = "grid_row_height";
+pub const ROW_HEIGHT_KEY: &str = "grid_row_height";
+/// Key of the SQL editor height preference in `ui_prefs.parquet`.
+pub const EDITOR_HEIGHT_KEY: &str = "sql_editor_height";
 
 /// A recently opened data file, newest first.
 #[derive(Debug, Clone)]
@@ -260,34 +262,38 @@ impl StateStore {
 
     // -- UI preferences -------------------------------------------------------
 
-    /// The persisted uniform grid row height, if one was saved and is sane.
-    pub fn load_grid_row_height(&self) -> Option<f32> {
+    /// Every persisted numeric UI preference, keyed by name. Non-finite or
+    /// non-positive values are dropped so a corrupt row cannot poison a layout.
+    pub fn load_ui_prefs(&self) -> HashMap<String, f32> {
+        let mut out = HashMap::new();
         for batch in self.read(UI_PREFS_FILE) {
             let key = str_col(&batch, "key");
             let value = f32_col(&batch, "value");
             for r in 0..batch.num_rows() {
-                if get_str(&key, r) == Some(ROW_HEIGHT_KEY)
-                    && let Some(v) = get_f32(&value, r)
+                if let (Some(k), Some(v)) = (get_str(&key, r), get_f32(&value, r))
                     && v.is_finite()
                     && v > 0.0
                 {
-                    return Some(v);
+                    out.insert(k.to_string(), v);
                 }
             }
         }
-        None
+        out
     }
 
-    pub fn save_grid_row_height(&self, height: f32) {
+    /// Rewrite the whole preferences file from `prefs`.
+    pub fn save_ui_prefs(&self, prefs: &[(&str, f32)]) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
             Field::new("value", DataType::Float32, false),
         ]));
+        let keys: Vec<&str> = prefs.iter().map(|(k, _)| *k).collect();
+        let values: Vec<f32> = prefs.iter().map(|(_, v)| *v).collect();
         match RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(StringArray::from(vec![ROW_HEIGHT_KEY])),
-                Arc::new(Float32Array::from(vec![height])),
+                Arc::new(StringArray::from(keys)),
+                Arc::new(Float32Array::from(values)),
             ],
         ) {
             Ok(batch) => self.write(UI_PREFS_FILE, &batch),
@@ -498,11 +504,14 @@ mod tests {
     }
 
     #[test]
-    fn row_height_round_trip() {
-        let store = StateStore::with_dir(temp_dir("row-height"));
-        assert_eq!(store.load_grid_row_height(), None);
-        store.save_grid_row_height(42.5);
-        assert_eq!(store.load_grid_row_height(), Some(42.5));
+    fn ui_prefs_round_trip() {
+        let store = StateStore::with_dir(temp_dir("ui-prefs"));
+        assert!(store.load_ui_prefs().is_empty());
+        store.save_ui_prefs(&[(ROW_HEIGHT_KEY, 42.5), (EDITOR_HEIGHT_KEY, 0.0)]);
+        let prefs = store.load_ui_prefs();
+        assert_eq!(prefs.get(ROW_HEIGHT_KEY), Some(&42.5));
+        // Non-positive values are discarded on load.
+        assert_eq!(prefs.get(EDITOR_HEIGHT_KEY), None);
         let _ = std::fs::remove_dir_all(store.dir);
     }
 }

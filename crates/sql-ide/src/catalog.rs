@@ -8,6 +8,8 @@
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Catalog {
     pub databases: Vec<Database>,
+    /// Function names the engine knows. Empty means "use the builtin list".
+    pub functions: Vec<String>,
 }
 
 /// A FlightSQL catalog (or the single synthetic catalog for a local file).

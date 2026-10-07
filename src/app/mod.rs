@@ -43,9 +43,16 @@ impl App {
         let store = StateStore::new(&app_dir);
         let history = store.load_history();
         let column_widths = store.load_column_widths();
-        let grid_row_height = store
-            .load_grid_row_height()
+        let ui_prefs = store.load_ui_prefs();
+        let grid_row_height = ui_prefs
+            .get(crate::store::ROW_HEIGHT_KEY)
+            .copied()
             .unwrap_or(crate::views::data::DEFAULT_ROW_HEIGHT);
+        let editor_height = ui_prefs
+            .get(crate::store::EDITOR_HEIGHT_KEY)
+            .copied()
+            .unwrap_or(DEFAULT_EDITOR_HEIGHT)
+            .clamp(MIN_EDITOR_HEIGHT, MAX_EDITOR_HEIGHT);
         let recent_files = store.load_recent_files();
         let mut app = App {
             local,
@@ -59,6 +66,8 @@ impl App {
             ..Self::new()
         };
         app.sql.history = history;
+        app.sql.editor_height = editor_height;
+        app.function_names = app.local.function_names();
         // Capture the main window's native handles so file dialogs can be
         // parented to it. Runs once the window exists.
         let capture_window = iced::window::latest().then(|maybe_id| match maybe_id {
@@ -356,6 +365,9 @@ impl App {
             redo_stack: Vec::new(),
             undo_group_open: false,
             last_edit_kind: None,
+            editor_viewport: None,
+            bracket_pair: None,
+            completion_armed: false,
         });
         self.sql.active = self.sql.editors.len() - 1;
         id
@@ -406,9 +418,12 @@ impl App {
         task
     }
 
-    /// Build the completion [`sql_ide::Catalog`] for a tab's bound engine.
+    /// Build the completion [`sql_ide::Catalog`] for a tab's bound engine. The
+    /// function list always comes from the local DataFusion session: FlightSQL
+    /// servers this app targets are DataFusion too, and the builtin fallback is
+    /// far smaller.
     fn catalog_for_engine(&self, engine: &QueryEngine) -> sql_ide::Catalog {
-        match engine {
+        let mut catalog = match engine {
             QueryEngine::Local(_) => Explorer::local_catalog(
                 self.files
                     .iter()
@@ -420,13 +435,25 @@ impl App {
                 .position(|c| Arc::ptr_eq(c, client))
                 .map(|i| self.explorer.flight_catalog(i))
                 .unwrap_or_default(),
-        }
+        };
+        catalog.functions = self.function_names.clone();
+        catalog
     }
 
-    /// Recompute completions and diagnostics for one editor after an edit.
-    /// The popup only opens when the cursor sits at the end of a word or just
-    /// after a `.`, so it does not pop up on every keystroke (e.g. spaces).
+    /// Recompute diagnostics, the bracket pair, and (when the tab is armed by
+    /// typing) completions for one editor. The popup only opens when the caret
+    /// sits at the end of a word or just after a `.`.
     fn refresh_intellisense(&mut self, id: u64) {
+        self.refresh_intellisense_inner(id, false);
+    }
+
+    /// Like [`Self::refresh_intellisense`] but opens the popup even with no
+    /// typed prefix (Ctrl+Space).
+    fn refresh_intellisense_forced(&mut self, id: u64) {
+        self.refresh_intellisense_inner(id, true);
+    }
+
+    fn refresh_intellisense_inner(&mut self, id: u64, force: bool) {
         let Some(idx) = self.sql.editors.iter().position(|t| t.id == id) else {
             return;
         };
@@ -435,13 +462,20 @@ impl App {
         let tab = &mut self.sql.editors[idx];
         let text = tab.content.text();
         let cursor = tab.content.cursor();
-        // sql_ide uses 1-based positions; the editor cursor is 0-based.
+        // sql_ide uses 1-based char positions; the editor cursor is 0-based
+        // with a byte column.
         let line = cursor.position.line as u64 + 1;
-        let col = cursor.position.column as u64 + 1;
+        let col = tab.caret_char_column() as u64 + 1;
 
         tab.diagnostics = sql_ide::diagnostics(&text);
+        tab.bracket_pair = sql_ide::matching_bracket(&text, line, col).map(|pair| {
+            pair.map(|(l, c)| (l.saturating_sub(1) as usize, c.saturating_sub(1) as usize))
+                .map(|(l, c)| (l, char_col_to_byte(&text, l, c)))
+        });
 
-        if should_complete(&text, cursor.position.line, cursor.position.column) {
+        let wants_popup = tab.completion_armed
+            && (force || should_complete(&text, cursor.position.line, cursor.position.column));
+        if wants_popup {
             let items = sql_ide::complete(&text, line, col, &catalog);
             tab.completion = if items.is_empty() {
                 None
@@ -456,6 +490,31 @@ impl App {
         } else {
             tab.completion = None;
         }
+    }
+
+    /// Scroll the editor's outer scroll area so the caret line is visible. A
+    /// no-op until the first `EditorScrolled` report gives us the viewport.
+    fn scroll_editor_to_caret(&self, id: u64) -> Task<Message> {
+        let Some(t) = self.sql.editors.iter().find(|t| t.id == id) else {
+            return Task::none();
+        };
+        let Some(vp) = t.editor_viewport else {
+            return Task::none();
+        };
+        let line = t.content.cursor().position.line as f32;
+        let top = crate::views::sql::EDITOR_PAD + line * crate::views::sql::LINE_H;
+        let bottom = top + crate::views::sql::LINE_H;
+        let target = if top < vp.offset_y {
+            (top - crate::views::sql::EDITOR_PAD).max(0.0)
+        } else if bottom > vp.offset_y + vp.height {
+            bottom + crate::views::sql::EDITOR_PAD - vp.height
+        } else {
+            return Task::none();
+        };
+        iced::advanced::widget::operate(iced::advanced::widget::operation::scrollable::scroll_to(
+            crate::views::sql::editor_scroll_id(id),
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: target }.into(),
+        ))
     }
 
     /// Apply a completion: delete the typed prefix and insert the candidate.
@@ -580,8 +639,16 @@ impl App {
             .map(|t| t.row_height)
         {
             self.grid_row_height = h;
-            self.store.save_grid_row_height(h);
+            self.persist_ui_prefs();
         }
+    }
+
+    /// Write every numeric UI preference (grid row height, editor height).
+    fn persist_ui_prefs(&self) {
+        self.store.save_ui_prefs(&[
+            (crate::store::ROW_HEIGHT_KEY, self.grid_row_height),
+            (crate::store::EDITOR_HEIGHT_KEY, self.sql.editor_height),
+        ]);
     }
 
     /// Mutable export-dialog state for a SQL tab, if open.
