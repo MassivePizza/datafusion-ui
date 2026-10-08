@@ -2,8 +2,6 @@
 //! source), the active editor + results grid, a shared in-memory query-history
 //! panel, and the FlightSQL connect modal. Styling reuses `crate::theme`.
 
-use std::time::Duration;
-
 use iced::alignment::Vertical;
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
@@ -330,15 +328,11 @@ fn editor_pane(tab: &SqlEditorTab, editor_height: f32) -> Element<'_, Message> {
 
     let meta: Element<'_, Message> = if tab.running {
         theme::mono_sm("running…").wrapping(Wrapping::None).into()
-    } else if let (Some(ns), Some(rows)) = (tab.last_elapsed_ns, tab.last_row_count) {
-        theme::mono_sm(format!(
-            "{} rows · {:?}",
-            count(rows),
-            Duration::from_nanos(ns)
-        ))
-        .wrapping(Wrapping::None)
-        .style(muted)
-        .into()
+    } else if let (Some(elapsed), Some(rows)) = (tab.last_elapsed, tab.last_row_count) {
+        theme::mono_sm(format!("{} rows · {}", count(rows), elapsed))
+            .wrapping(Wrapping::None)
+            .style(muted)
+            .into()
     } else {
         Space::new().width(Length::Fixed(0.0)).into()
     };
@@ -1131,10 +1125,10 @@ fn history_row<'a>(i: usize, entry: &'a crate::app::QueryHistoryEntry) -> Elemen
         _ => "—".to_string(),
     };
     let meta = theme::mono_sm(format!(
-        "{} · {} · {:?} · {}",
+        "{} · {} · {} · {}",
         entry.source_label,
         rows_label,
-        Duration::from_nanos(entry.elapsed_ns),
+        entry.elapsed,
         relative_time(entry.ran_at),
     ))
     .size(10)

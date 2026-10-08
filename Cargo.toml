@@ -26,6 +26,7 @@ rust-version.workspace = true
 [dependencies]
 sql-ide = { workspace = true }
 arrow = { version = "59", features = ["chrono-tz"] }
+chrono = { version = "0.4", default-features = false }
 datafusion = "55"
 iced = { version = "0.14.0", features = ["tokio", "canvas", "advanced"] }
 parquet = "59"

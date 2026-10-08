@@ -17,9 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use arrow::array::{Array, Float32Array, Int32Array, Int64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{
+    Array, ArrowPrimitiveType, DurationNanosecondArray, Float32Array, Int32Array, Int64Array,
+    PrimitiveArray, StringArray,
+};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
+use chrono::TimeDelta;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
@@ -137,7 +141,7 @@ impl StateStore {
             let status = str_col(&batch, "status");
             let error = str_col(&batch, "error");
             let row_count = i64_col(&batch, "row_count");
-            let elapsed = u64_col(&batch, "elapsed_ms");
+            let elapsed = dur_ns_col(&batch, "elapsed");
             let ran_at = i64_col(&batch, "ran_at_ms");
             for r in 0..batch.num_rows() {
                 let status = match get_str(&status, r) {
@@ -151,7 +155,7 @@ impl StateStore {
                     source_label: get_str(&source, r).unwrap_or_default().to_string(),
                     status,
                     row_count: get_i64(&row_count, r),
-                    elapsed_ns: get_u64(&elapsed, r).unwrap_or(0),
+                    elapsed: get_dur_ns(&elapsed, r).unwrap_or_default(),
                     ran_at: millis_to_systemtime(get_i64(&ran_at, r).unwrap_or(0)),
                 });
             }
@@ -166,7 +170,7 @@ impl StateStore {
             Field::new("status", DataType::Utf8, false),
             Field::new("error", DataType::Utf8, true),
             Field::new("row_count", DataType::Int64, true),
-            Field::new("elapsed_ms", DataType::Int64, false),
+            Field::new("elapsed", DataType::Duration(TimeUnit::Nanosecond), false),
             Field::new("ran_at_ms", DataType::Int64, false),
         ]));
         let sql = StringArray::from_iter_values(entries.iter().map(|e| e.sql.as_str()));
@@ -184,8 +188,9 @@ impl StateStore {
                 })
                 .collect::<Vec<_>>(),
         );
-        let row_count = Int64Array::from(entries.iter().map(|e| e.row_count).collect::<Vec<_>>());
-        let elapsed = Int64Array::from_iter_values(entries.iter().map(|e| e.elapsed_ns as i64));
+        let row_count = Int64Array::from_iter(entries.iter().map(|e| e.row_count));
+        let elapsed =
+            DurationNanosecondArray::from_iter(entries.iter().map(|e| e.elapsed.num_nanoseconds()));
         let ran_at =
             Int64Array::from_iter_values(entries.iter().map(|e| systemtime_to_millis(e.ran_at)));
         match RecordBatch::try_new(
@@ -385,26 +390,34 @@ fn get_str(a: &StringArray, r: usize) -> Option<&str> {
     (r < a.len() && a.is_valid(r)).then(|| a.value(r))
 }
 
-fn get_i64(a: &Int64Array, r: usize) -> Option<i64> {
+fn get_prim<T: ArrowPrimitiveType>(a: &PrimitiveArray<T>, r: usize) -> Option<T::Native> {
     (r < a.len() && a.is_valid(r)).then(|| a.value(r))
 }
 
-fn get_u64(a: &UInt64Array, r: usize) -> Option<u64> {
-    (r < a.len() && a.is_valid(r)).then(|| a.value(r))
+fn get_i64(a: &Int64Array, r: usize) -> Option<i64> {
+    get_prim(a, r)
 }
 
 fn get_i32(a: &Int32Array, r: usize) -> Option<i32> {
-    (r < a.len() && a.is_valid(r)).then(|| a.value(r))
+    get_prim(a, r)
 }
 
 fn get_f32(a: &Float32Array, r: usize) -> Option<f32> {
-    (r < a.len() && a.is_valid(r)).then(|| a.value(r))
+    get_prim(a, r)
 }
+
+fn get_dur_ns(a: &DurationNanosecondArray, r: usize) -> Option<TimeDelta> {
+    (r < a.len() && a.is_valid(r))
+        .then(|| a.value_as_duration(r))
+        .flatten()
+}
+
 fn get_col<A: Array + Clone + 'static>(batch: &RecordBatch, name: &str) -> Option<A> {
     batch
         .column_by_name(name)
         .and_then(|c| c.as_any().downcast_ref::<A>().cloned())
 }
+
 macro_rules! get_col_or_null {
     (
         $(
@@ -424,9 +437,9 @@ macro_rules! get_col_or_null {
 get_col_or_null!(
     str_col(StringArray),
     i64_col(Int64Array),
-    u64_col(UInt64Array),
     i32_col(Int32Array),
-    f32_col(Float32Array)
+    f32_col(Float32Array),
+    dur_ns_col(DurationNanosecondArray)
 );
 
 #[cfg(test)]
@@ -450,7 +463,7 @@ mod tests {
                 source_label: "local session".into(),
                 status: HistoryStatus::Ok,
                 row_count: Some(1),
-                elapsed_ns: 12,
+                elapsed: TimeDelta::seconds(12),
                 ran_at: UNIX_EPOCH + Duration::from_millis(1_700_000_000_000),
             },
             QueryHistoryEntry {
@@ -458,7 +471,7 @@ mod tests {
                 source_label: "flight: x".into(),
                 status: HistoryStatus::Err("boom".into()),
                 row_count: None,
-                elapsed_ns: 3,
+                elapsed: TimeDelta::seconds(3),
                 ran_at: UNIX_EPOCH + Duration::from_millis(1_700_000_001_000),
             },
         ];

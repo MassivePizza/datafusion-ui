@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use chrono::TimeDelta;
 use iced::widget::text_editor;
 
 use crate::engine::QueryResult;
@@ -118,7 +119,7 @@ pub enum SqlMessage {
         id: u64,
         sql: String,
         source_label: String,
-        elapsed_ns: u64,
+        elapsed: TimeDelta,
         result: Result<QueryResult, AppError>,
     },
     ExportOpen(u64),

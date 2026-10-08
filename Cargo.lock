@@ -2139,6 +2139,7 @@ dependencies = [
  "arrow",
  "arrow-flight",
  "base64 0.22.1",
+ "chrono",
  "clap",
  "dark-light",
  "datafusion",

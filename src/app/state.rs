@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use ahash::AHashSet;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+use chrono::TimeDelta;
 use iced::widget::text_editor;
 use iced::widget::text_editor::{Action, Motion};
 
@@ -257,7 +258,7 @@ pub struct SqlEditorTab {
     pub schema: Option<SchemaRef>,
     pub error: Option<String>,
     pub last_row_count: Option<i64>,
-    pub last_elapsed_ns: Option<u64>,
+    pub last_elapsed: Option<TimeDelta>,
     pub truncated: bool,
     /// Open autocomplete popup, if any.
     pub completion: Option<CompletionState>,
@@ -520,7 +521,7 @@ pub struct QueryHistoryEntry {
     pub source_label: String,
     pub status: HistoryStatus,
     pub row_count: Option<i64>,
-    pub elapsed_ns: u64,
+    pub elapsed: TimeDelta,
     pub ran_at: SystemTime,
 }
 
